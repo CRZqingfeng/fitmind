@@ -5,6 +5,7 @@ import com.fitmind.aigc.constants.AigcConstants;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
@@ -139,10 +140,65 @@ public class MockChatModel implements ChatModel {
             return new MockPlan(buildToolAnswer(userText), null, props.getMock().getChunkDelayMs());
         }
 
+        // ★ 分类任务（意图路由）：必须返回一个确定的类别
+        if (isClassifyTask(prompt)) {
+            String category = classify(userText);
+            log.info("[Mock通道] 识别为分类任务，按关键词判定类别={}", category);
+            // 分类任务返回"干净的一个词"（不带上下文后缀）——
+            // 真模型在这种 prompt 下也是只输出一个词的
+            return new MockPlan(category, null, 0);
+        }
+
         int delay = userText.contains(CMD_SLOW)
                 ? props.getMock().getChunkDelayMs() * 10
                 : props.getMock().getChunkDelayMs();
         return new MockPlan(answer(userText, prompt), null, delay);
+    }
+
+    /**
+     * 判断这是不是一个"分类任务"（如意图路由）。
+     *
+     * <p>★ 为什么 Mock 需要识别任务类型：多 Agent 路由的验收要能
+     * <b>断言"这句话被分派给了正确的 Agent"</b>。如果 Mock 对所有提问都返回
+     * 同一段话，路由解析就会永远失败、永远走兜底分支 ——
+     * 表现是"路由功能看起来没生效"，而实际上是 Mock 通道没能覆盖到这条链路。</p>
+     *
+     * <p>识别方式是<b>判断 system 提示词的语义特征</b>（"分类器"/"只输出一个单词"），
+     * 而不是匹配某个具体文件名或标记 —— 这样调整提示词措辞不会让它失效，
+     * 生产用的提示词里也不需要塞任何测试专用的标记。</p>
+     */
+    private boolean isClassifyTask(Prompt prompt) {
+        for (Message m : prompt.getInstructions()) {
+            if (m instanceof SystemMessage sm) {
+                String text = sm.getText();
+                if (text != null && (text.contains("分类器") || text.contains("只输出一个单词")
+                        || text.contains("意图分类"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 确定性的"意图分类"：按提问里的关键词判定类别。
+     *
+     * <p>规则与真实提示词里的类别定义一一对应，所以验收脚本可以用
+     * "帮我推荐一门课"、"这门课多少钱" 这类提问精确控制路由结果。</p>
+     */
+    private String classify(String userText) {
+        String q = stripCommands(userText);
+        if (q.contains("推荐") || q.contains("适合我") || q.contains("该练什么") || q.contains("帮我挑")) {
+            return "RECOMMEND";
+        }
+        if (q.contains("买") || q.contains("价格") || q.contains("多少钱") || q.contains("报名")
+                || q.contains("支付") || q.contains("退款")) {
+            return "BUY";
+        }
+        if (q.contains("课") || q.contains("课程")) {
+            return "CONSULT";
+        }
+        return "KNOWLEDGE";
     }
 
     /**

@@ -17,6 +17,7 @@ public class AigcProperties {
 
     private Chat chat = new Chat();
     private Mock mock = new Mock();
+    private Prompt prompt = new Prompt();
 
     @Data
     public static class Chat {
@@ -39,6 +40,25 @@ public class AigcProperties {
          * 超时后返回可读的降级文案（不是 500），见 {@code AigcConstants.FALLBACK_MODEL_BUSY}。</p>
          */
         private int timeoutMs = 60_000;
+
+        /**
+         * 默认编排策略：{@code ROUTE} / {@code ENHANCE} / {@code SIMPLE}。
+         *
+         * <p>它是"部署级默认值"，请求可以临时覆盖（见 {@code ChatRequestDTO.chatType}）——
+         * 覆盖能力主要给演示与验收用：同一个提问在三种策略下各跑一遍，
+         * 就能横向对比延迟、模型调用次数与回答质量。</p>
+         */
+        private String type = "ROUTE";
+
+        /**
+         * 意图路由单独的超时（毫秒）。
+         *
+         * <p>★ 必须比主回答的超时短得多：路由的任务只是"输出一个词"，
+         * 但它处在链路最前面 —— 用主超时（60s）的话，
+         * 模型侧一抖动用户就要<b>干等 60 秒才看到第一个字</b>。
+         * 给它 10 秒足够了，超了就兜底到知识问答（用户几乎无感）。</p>
+         */
+        private int routeTimeoutMs = 10_000;
     }
 
     @Data
@@ -64,5 +84,86 @@ public class AigcProperties {
          * 关掉它的场景只有一个 —— 压测时不想让 Redis 承担这个写入。</p>
          */
         private boolean snapshotPrompt = true;
+    }
+
+    /**
+     * 提示词（Prompt）配置。
+     *
+     * <p>提示词的三级来源，<b>从高到低</b>：
+     * ① Nacos 配置（可热更新，不用重启服务）
+     * ② classpath 下的 {@code prompts/{key}.txt}（跟代码一起发版）
+     * ③ {@code PromptManager} 里的代码兜底常量
+     * </p>
+     *
+     * <p>★ 为什么要有第 ②③ 级 —— 这是对常见实现的一处实质修正：
+     * 它只在启动时从 Nacos 读一次，读失败只打一行 error 日志，
+     * {@code AtomicReference} 里保持 null，于是 {@code systemMessage()} 返回空串 ——
+     * <b>模型收到的 system 提示是空的</b>，回答风格、安全边界、输出格式全部失效。
+     * 这个故障的表现是"AI 突然变得不受控"，而日志里只有一行容易被忽略的 error，
+     * 排查方向还容易跑偏到模型或网络上去。</p>
+     *
+     * <p>三级兜底之后，"提示词为空"这件事在结构上就不可能发生。</p>
+     */
+    @Data
+    public static class Prompt {
+
+        private Nacos nacos = new Nacos();
+
+        @Data
+        public static class Nacos {
+
+            /**
+             * 是否从 Nacos 读取提示词。
+             *
+             * <p>关掉它就是"纯本地文件"模式（离线开发、Nacos 没起来时很有用）。
+             * 注意关掉不会导致提示词为空 —— 会回落到本地文件与代码兜底。</p>
+             */
+            private boolean enabled = true;
+
+            private String serverAddr = "127.0.0.1:8848";
+
+            private String username = "nacos";
+
+            private String password = "nacos";
+
+            private String group = "DEFAULT_GROUP";
+
+            /**
+             * 命名空间。
+             *
+             * <p>★ <b>这个参数必须与"发布配置时选的命名空间"严格一致，否则会静默读不到。</b>
+             * 本次实测踩到了：用 HTTP API 发布配置时没带 tenant 参数（落在 <b>空</b> 命名空间），
+             * 而 Nacos 3.x 客户端默认查的是 <b>public</b> —— 两者在服务端是<b>两个不同</b>
+             * 的命名空间（3.x 之前 public 的 ID 是空串，之后是 {@code public}，
+             * 这个变化让"发布成功但读不到"变得很容易发生）。
+             *
+             * <p>它的表现极具迷惑性：<b>发布接口返回 true、配置列表里也能看到、
+             * 但客户端 getConfig 返回 null（＝"没配置过"），不打任何错误日志</b>。
+             * 所以：<b>看到"配置明明在，服务却说没有"时，第一件事就是对命名空间。</b></p>
+             */
+            private String namespace = "public";
+
+            /**
+             * dataId 前缀。每个 Agent 一个配置项：
+             * {@code fm-aigc-prompt-route} / {@code -consult} / ...
+             *
+             * <p>★ 每个 Agent 单独一个 dataId（而不是塞在一个大配置里），
+             * 这样在 Nacos 控制台上能一个一个改、一个一个看历史版本 ——
+             * 调提示词是个高频操作，"改 A 不小心碰到 B"的成本比多几个配置项高得多。</p>
+             */
+            private String dataIdPrefix = "fm-aigc-prompt-";
+
+            private long timeoutMs = 3000L;
+
+            /**
+             * 提示词缓存有效期（毫秒）：超过它就主动去 Nacos 重新拉一次。
+             *
+             * <p>★ 这是"配置变更最终生效"的<b>兜底保证</b>，不依赖 Nacos 的推送。
+             * 推送（listener）能工作时是秒级生效；不能工作时靠这个在 TTL 内生效。
+             * 默认 30 秒 —— 对"改提示词"这个场景足够快，而开销可以忽略
+             * （getConfig 走客户端本地缓存 + 服务端比对 MD5，不传内容）。</p>
+             */
+            private long refreshIntervalMs = 30_000L;
+        }
     }
 }

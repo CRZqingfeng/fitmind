@@ -3,6 +3,7 @@ package com.fitmind.aigc.service.impl;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
+import com.fitmind.aigc.agent.AgentContext;
 import com.fitmind.aigc.config.AigcProperties;
 import com.fitmind.aigc.constants.AigcConstants;
 import com.fitmind.aigc.domain.dto.ChatRequestDTO;
@@ -10,12 +11,14 @@ import com.fitmind.aigc.domain.po.ChatMessage;
 import com.fitmind.aigc.domain.po.ChatSession;
 import com.fitmind.aigc.domain.vo.ChatEventVO;
 import com.fitmind.aigc.domain.vo.ChatResultVO;
+import com.fitmind.aigc.orchestration.ChatOrchestrator;
+import com.fitmind.aigc.orchestration.ChatType;
+import com.fitmind.aigc.orchestration.OrchestrationResult;
 import com.fitmind.aigc.service.IChatService;
 import com.fitmind.aigc.service.IChatSessionService;
 import com.fitmind.common.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.stereotype.Service;
@@ -39,33 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @RequiredArgsConstructor
 public class ChatServiceImpl implements IChatService {
 
-    /**
-     * 教练人设与安全边界。
-     *
-     * <p>⚠️ M6-1 先写在这里；M6-2 会挪到 {@code PromptManager}（Nacos 外置 + 本地兜底），
-     * 那时这一段可以通过配置改而不用发版。</p>
-     *
-     * <p>★ 安全边界这几条不是"写给人看的免责声明"，它们会真实约束输出：
-     * 医疗类问题、伤痛状态、极端节食这几种情况，模型必须转向"建议就医"
-     * 而不是给方案 —— 健身建议给错是会伤人的，这部分比"回答得漂亮"重要。</p>
-     */
-    private static final String SYSTEM_PROMPT = """
-            你是 FitMind 的 AI 健身教练「小飞」。
-
-            风格要求：
-            - 直接、专业、不绕弯子。先给结论，再给理由，最后给可执行的做法。
-            - 用口语化的短句，不要写成教科书段落。用户问的是"我该怎么做"，不是"请介绍这个概念"。
-            - 不确定的事情就说不确定，不要编造研究数据、论文或权威来源。
-
-            安全边界（优先级高于上面所有风格要求）：
-            - 你只处理健身训练、营养、恢复相关的问题。
-            - 涉及疾病诊断、用药、伤病治疗时，明确说"这个我判断不了，建议找医生或康复师"，
-              然后只谈"在医生允许的前提下，训练上可以先怎么调整"，不要给治疗方案。
-            - 用户提到明显伤病或疼痛时，先建议就医，再谈训练。
-            - 不鼓励极端节食、脱水减重、带伤训练。
-            """;
-
-    private final ChatClient chatClient;
+    private final ChatOrchestrator orchestrator;
     private final IChatSessionService sessionService;
     private final AigcProperties props;
 
@@ -76,11 +53,17 @@ public class ChatServiceImpl implements IChatService {
         Long userId = UserContext.getUser();
         ChatTurn turn = prepare(dto, userId);
 
-        return chatClient.prompt()
-                .system(SYSTEM_PROMPT)
-                .user(turn.question)
-                .stream()
-                .chatResponse()
+        // 编排策略：请求参数优先（演示与验收用），否则取配置默认值
+        ChatType chatType = ChatType.parse(
+                StrUtil.isNotBlank(dto.getChatType()) ? dto.getChatType() : props.getChat().getType());
+        turn.chatType = chatType;
+        // ⚠️ 这一步是"构造阶段"（同步执行），不是"订阅阶段" ——
+        //    ROUTE 策略下它会真的去调一次路由模型。所以它抛出的异常
+        //    **接不住**下面的 onErrorResume（那时流还没被订阅），
+        //    必须在 orchestrate() 内部就地兜住。
+        OrchestrationResult orchestration = orchestrate(chatType, turn);
+
+        return orchestration.responses()
                 // ★ 超时必须有：模型服务抖动时可能长时间不吐字，而 SSE 连接会一直挂着占线程。
                 //   超时抛的是 java.util.concurrent.TimeoutException ——
                 //   与 Mock 通道模拟的"模型侧超时"是同一个类型，所以两条路共用一个降级分支。
@@ -160,10 +143,13 @@ public class ChatServiceImpl implements IChatService {
             var meta = JSONUtil.parseObj(metaJson);
             vo.setSessionId(meta.getStr("sessionId"))
                     .setRequestId(meta.getStr("requestId"))
+                    .setAgentType(meta.getStr("agentType"))
+                    .setChatType(meta.getStr("chatType"))
                     .setFirstTokenMs(meta.getInt("firstTokenMs"))
                     .setTotalMs(meta.getInt("totalMs"))
                     .setPromptTokens(meta.getInt("promptTokens"))
                     .setCompletionTokens(meta.getInt("completionTokens"))
+                    .setRoutePromptTokens(meta.getInt("routePromptTokens"))
                     .setDegraded(meta.getBool("degraded", false));
         }
         return vo;
@@ -193,6 +179,34 @@ public class ChatServiceImpl implements IChatService {
                 .setContent(dto.getContent()));
         sessionService.touch(session.getSessionId(), userId, 1);
         return turn;
+    }
+
+    /**
+     * 分派给编排器，并记录"这次是谁回答的"。
+     *
+     * <p>★ 这里的 try-catch 不是防御性编程，而是因为<b>异常发生的位置特殊</b>：
+     * 编排是在"构造 Flux"的阶段同步执行的（ROUTE 策略下会真的去调一次路由模型），
+     * 此时流还没被订阅，后面的 {@code onErrorResume} 根本接不住这个异常 ——
+     * 只会变成一个 500。所以在这里就地兜住，并把它转成 {@code Flux.error}
+     * 交给降级链路去统一处理（用户看到的还是那句可读的降级文案，不是 500）。</p>
+     */
+    private OrchestrationResult orchestrate(ChatType chatType, ChatTurn turn) {
+        AgentContext context = new AgentContext(
+                turn.sessionId, turn.requestId, turn.userId, turn.question);
+        try {
+            OrchestrationResult result = orchestrator.dispatch(chatType, context);
+            turn.agentLabel = result.label();
+            // ★ 把编排动作的 token 开销也记进这一轮：ROUTE 策略的花费 = 路由 + 回答，
+            //   只记后者会让这个策略的成本被系统性低估一次模型调用
+            turn.routePromptTokens = result.extraPromptTokens();
+            turn.routeCompletionTokens = result.extraCompletionTokens();
+            return result;
+        } catch (Exception e) {
+            log.error("编排失败（chatType={}），转由降级链路处理", chatType, e);
+            turn.agentLabel = "failed";
+            // 显式给泛型参数：Flux.error 单独用会被推断成 Flux<Object>
+            return OrchestrationResult.of(null, Flux.<ChatResponse>error(e));
+        }
     }
 
     /** 处理一个模型分片：记首字延迟、累计 token、包成 DATA 事件 */
@@ -234,15 +248,16 @@ public class ChatServiceImpl implements IChatService {
                     .setRequestId(turn.requestId)
                     .setRole(AigcConstants.ROLE_ASSISTANT)
                     .setContent(turn.answer.toString())
+                    .setAgentType(turn.agentLabel)
                     .setProvider(props.getChat().getProvider())
-                    .setPromptTokens(turn.promptTokens)
-                    .setCompletionTokens(turn.completionTokens)
+                    .setPromptTokens(turn.totalPromptTokens() == 0 ? null : turn.totalPromptTokens())
+                    .setCompletionTokens(turn.totalCompletionTokens() == 0 ? null : turn.totalCompletionTokens())
                     .setFirstTokenMs(turn.firstTokenMs < 0 ? null : turn.firstTokenMs)
                     .setTotalMs((int) (System.currentTimeMillis() - turn.startMs));
             sessionService.saveMessage(msg);
             sessionService.touch(turn.sessionId, turn.userId, 1);
-            log.info("本轮对话完成：requestId={}, 首字 {}ms, 总耗时 {}ms, tokens={}/{}, 降级={}",
-                    turn.requestId, turn.firstTokenMs, msg.getTotalMs(),
+            log.info("本轮对话完成：requestId={}, 编排={}, Agent={}, 首字 {}ms, 总耗时 {}ms, tokens={}/{}, 降级={}",
+                    turn.requestId, turn.chatType, turn.agentLabel, turn.firstTokenMs, msg.getTotalMs(),
                     turn.promptTokens, turn.completionTokens, degraded);
         } catch (Exception e) {
             // 落库失败不能影响用户已经看到的回答 —— 回答已经吐出去了，
@@ -265,10 +280,20 @@ public class ChatServiceImpl implements IChatService {
                 .setData(JSONUtil.createObj()
                         .set("sessionId", turn.sessionId)
                         .set("requestId", turn.requestId)
+                        // ★ 把"谁回答的"和"用了哪种编排"一起给前端：
+                        //   前端可以据此显示"由课程顾问回答"这类标注，
+                        //   而在演示三种编排策略的对比时，这两个字段也是最直观的区分
+                        .set("agentType", turn.agentLabel)
+                        .set("chatType", turn.chatType.name())
                         .set("firstTokenMs", turn.firstTokenMs < 0 ? null : turn.firstTokenMs)
                         .set("totalMs", (int) (System.currentTimeMillis() - turn.startMs))
-                        .set("promptTokens", turn.promptTokens)
-                        .set("completionTokens", turn.completionTokens)
+                        // token 是**本轮总量**（回答 + 编排动作）——
+                        // 使用者关心的是"这一轮花了多少"，不是"最后一次调用花了多少"
+                        .set("promptTokens", turn.totalPromptTokens() == 0 ? null : turn.totalPromptTokens())
+                        .set("completionTokens", turn.totalCompletionTokens() == 0 ? null : turn.totalCompletionTokens())
+                        // 另给一份明细：ROUTE 策略下路由单独花了多少（对比三种策略时要看这个）
+                        .set("routePromptTokens", turn.routePromptTokens)
+                        .set("routeCompletionTokens", turn.routeCompletionTokens)
                         .set("degraded", degraded)
                         .toString());
     }
@@ -286,6 +311,23 @@ public class ChatServiceImpl implements IChatService {
         private Integer promptTokens;
         private Integer completionTokens;
         private volatile boolean degraded;
+        /** 本次使用的编排策略 */
+        private ChatType chatType = ChatType.DEFAULT;
+        /** 实际产出回答的 Agent 标签（SIMPLE 策略下是 simple） */
+        private String agentLabel = "simple";
+        /** ★ 编排动作（ROUTE 策略下的路由调用）额外消耗的 token */
+        private int routePromptTokens;
+        private int routeCompletionTokens;
+
+        /** 本轮总输入 token = 回答那次调用 + 编排动作 */
+        private int totalPromptTokens() {
+            return (promptTokens == null ? 0 : promptTokens) + routePromptTokens;
+        }
+
+        /** 本轮总输出 token */
+        private int totalCompletionTokens() {
+            return (completionTokens == null ? 0 : completionTokens) + routeCompletionTokens;
+        }
 
         private ChatTurn(String sessionId, Long userId, String requestId, String question) {
             this.sessionId = sessionId;

@@ -6,6 +6,7 @@ import com.fitmind.aigc.domain.vo.ChatEventVO;
 import com.fitmind.aigc.domain.vo.ChatMessageVO;
 import com.fitmind.aigc.domain.vo.ChatResultVO;
 import com.fitmind.aigc.domain.vo.ChatSessionVO;
+import com.fitmind.aigc.prompt.PromptManager;
 import com.fitmind.aigc.service.IChatService;
 import com.fitmind.aigc.service.IChatSessionService;
 import com.fitmind.common.domain.dto.PageDTO;
@@ -22,6 +23,7 @@ import reactor.core.Disposable;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -44,6 +46,7 @@ public class ChatController {
 
     private final IChatService chatService;
     private final IChatSessionService sessionService;
+    private final PromptManager promptManager;
     private final AigcProperties props;
 
     @Operation(summary = "流式对话（SSE：DATA 增量文本 / PARAM 卡片参数 / STOP 结束）")
@@ -107,6 +110,22 @@ public class ChatController {
     @GetMapping("/provider")
     public String provider() {
         return props.getChat().getProvider();
+    }
+
+    /**
+     * 各提示词的当前来源。
+     *
+     * <p>★ 只返回"来源 + 长度"，<b>不返回提示词内容</b>：提示词里写着业务规则
+     * （什么时候该引导下单、安全边界在哪），那是内部资产，不该给任何登录用户看到。</p>
+     *
+     * <p>它解决的问题很具体：<b>"我改了 Nacos，怎么没生效？"</b>
+     * 可能是 dataId 拼错、group 不对、配置没发布、改错了环境……有一行
+     * "当前实际用的是哪一份"的查询，就不用靠猜。</p>
+     */
+    @Operation(summary = "各提示词的当前来源（Nacos / 本地文件 / 代码兜底）")
+    @GetMapping("/prompts")
+    public Map<String, String> prompts() {
+        return promptManager.describe();
     }
 
     // ==================== 内部 ====================

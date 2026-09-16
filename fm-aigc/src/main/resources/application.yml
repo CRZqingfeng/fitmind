@@ -61,6 +61,13 @@ fm:
       provider: ${AIGC_CHAT_PROVIDER:deepseek}
       # 单轮模型调用超时。超时后返回可读的降级文案，不是 500
       timeout-ms: ${AIGC_CHAT_TIMEOUT_MS:60000}
+      # ★ 意图路由单独的超时，必须比上面短得多：路由只输出一个词，
+      #   但它排在链路最前面，用 60s 的话模型一抖动用户要干等一分钟。
+      #   超了就兜底到知识问答（用户几乎无感）。
+      route-timeout-ms: ${AIGC_ROUTE_TIMEOUT_MS:10000}
+      # 默认编排策略：ROUTE（多 Agent）/ ENHANCE（单 Agent + 增强）/ SIMPLE（纯对话基线）
+      # 请求可以用 chatType 参数临时覆盖（演示与验收用）
+      type: ${AIGC_CHAT_TYPE:ROUTE}
     mock:
       # 每个分片的字符数 —— Mock 要"真的分片"，否则 SSE 拼接/打字机/
       # 打断时"已生成部分落库"这些代码在验收里等于没跑
@@ -68,6 +75,28 @@ fm:
       chunk-delay-ms: 30
       # 把 prompt 全文存进 Redis，供验收脚本断言"检索到的文档确实进了 prompt"
       snapshot-prompt: true
+    prompt:
+      # ★ 提示词三级来源：Nacos（热更新）→ classpath:prompts/*.txt → 代码兜底
+      #   关掉 Nacos 就是"纯本地文件"模式，功能不受影响，只是改提示词要重启。
+      #   注意：**读不到不等于出错** —— 不会出现"提示词为空导致 AI 不受控"（常见实现的坑）。
+      nacos:
+        enabled: ${AIGC_PROMPT_NACOS_ENABLED:true}
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        username: nacos
+        password: nacos
+        group: DEFAULT_GROUP
+        # ⚠️ 必须与"发布配置时选的命名空间"一致，否则静默读不到（发布返回 true、列表也看得到，
+        #    但客户端 getConfig 返回 null，且不报错）。Nacos 3.x 里 public 的 ID 是 public
+        #    （3.x 之前是空串），这个变化让"发布成功但读不到"很容易发生 —— 排查时先对这里。
+        namespace: ${AIGC_PROMPT_NACOS_NAMESPACE:public}
+        # 每个 Agent 一个配置项：fm-aigc-prompt-route / -consult / -recommend / -buy / -knowledge / -simple
+        data-id-prefix: fm-aigc-prompt-
+        timeout-ms: 3000
+        # ★ 缓存有效期：超过它就主动重新拉取。这是"配置变更最终生效"的兜底 ——
+        #   本环境实测 Nacos 的推送（listener）注册成功但不触发，
+        #   而主动拉取只依赖 getConfig（已验证可用），可靠性高得多。
+        #   30 秒对"改提示词"足够快，开销可忽略。设小一点调试更方便（比如 5000）。
+        refresh-interval-ms: ${AIGC_PROMPT_REFRESH_MS:30000}
 
 ---
 spring:

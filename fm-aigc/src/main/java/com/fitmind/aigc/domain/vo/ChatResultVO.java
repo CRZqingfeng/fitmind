@@ -29,8 +29,11 @@ public class ChatResultVO {
     @Schema(description = "完整回答")
     private String content;
 
-    @Schema(description = "由哪个 Agent 产出（M6-2 起有值）")
+    @Schema(description = "由哪个 Agent 产出（simple 表示未经过 Agent，如 SIMPLE 策略）")
     private String agentType;
+
+    @Schema(description = "本次使用的编排策略：ROUTE / ENHANCE / SIMPLE")
+    private String chatType;
 
     @Schema(description = "模型通道：deepseek / mock")
     private String provider;
@@ -46,6 +49,16 @@ public class ChatResultVO {
 
     @Schema(description = "总耗时（毫秒）")
     private Integer totalMs;
+
+    /**
+     * 编排动作（路由）额外消耗的输入 token。
+     *
+     * <p>★ 单独给出来，因为它是<b>ROUTE 策略相比 ENHANCE 多花的那部分</b>。
+     * 非流式返回的 {@code promptTokens} 已经是"回答 + 路由"的<b>总量</b>，
+     * 这个字段是明细 —— 做三种策略的成本对比时，看的就是它。</p>
+     */
+    @Schema(description = "其中路由调用消耗的输入 token（仅 ROUTE 策略非 0）")
+    private Integer routePromptTokens;
 
     /**
      * 是否发生了降级（模型超时/不可用 → 返回了兜底文案而不是 500）。

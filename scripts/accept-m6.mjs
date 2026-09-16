@@ -488,8 +488,139 @@ async function main() {
   const noAuth = await call('GET', SESSIONS_API, {});
   check('未登录访问会话列表被拦', noAuth.status === 401, `status=${noAuth.status}`);
 
-  // ==================== 7. 清理与自检 ====================
-  section('7. 清理与自检');
+
+  // ==================== 8. 多 Agent 路由（M6-2） ====================
+  section('8. ★ 多 Agent 意图路由');
+
+  const routeCases = [
+    ['帮我推荐一门适合我的课', 'recommend'],
+    ['这门课多少钱', 'buy'],
+    ['哑铃全身训练这门课有几节', 'consult'],
+    ['增肌期要吃多少蛋白质', 'knowledge'],
+  ];
+  for (const [q, expect] of routeCases) {
+    const r = await call('POST', CHAT_API, { body: { content: q }, token });
+    const got = r.json?.data?.agentType;
+    check(`路由正确：${q} → ${expect}`, got === expect, `实际=${got}`);
+  }
+
+  const routedSession = (await call('POST', CHAT_API,
+    { body: { content: '帮我推荐一门课', chatType: 'ROUTE' }, token })).json?.data?.sessionId;
+  const routedDb = sql(`SELECT agent_type FROM fm_aigc.chat_message WHERE session_id='${routedSession}' AND role='assistant'`);
+  check('★ agent_type 落库（复盘时要知道这条回答是谁产出的）',
+    routedDb === 'recommend', `落库值=${routedDb}`);
+
+  // ★ 路由是"每轮独立判定"而不是"会话级定一次"：
+  //   同一个会话里连着问两类不同的问题，两次应该落到不同的 Agent
+  const mixed1 = (await call('POST', CHAT_API, { body: { content: '这门课多少钱' }, token })).json?.data;
+  const mixed2 = (await call('POST', CHAT_API,
+    { body: { content: '那增肌期该吃多少蛋白质', sessionId: mixed1?.sessionId }, token })).json?.data;
+  check('★ 同一会话内路由逐轮独立（先 buy 后 knowledge）',
+    mixed1?.agentType === 'buy' && mixed2?.agentType === 'knowledge',
+    `第一轮=${mixed1?.agentType} 第二轮=${mixed2?.agentType}`);
+
+  // ==================== 9. 三种编排策略（M6-2） ====================
+  section('9. ★ 三种编排策略（配置切换 + 请求级覆盖）');
+
+  const qSame = '增肌期要吃多少蛋白质';
+  const byType = {};
+  for (const ct of ['ROUTE', 'ENHANCE', 'SIMPLE']) {
+    const r = await call('POST', CHAT_API, { body: { content: qSame, chatType: ct }, token });
+    byType[ct] = r.json?.data;
+    check(`${ct} 策略可用并返回结果`, !!byType[ct]?.content, `agent=${byType[ct]?.agentType}`);
+  }
+  check('ROUTE → 用路由判定出来的 Agent',
+    byType.ROUTE?.agentType === 'knowledge', `agent=${byType.ROUTE?.agentType}`);
+  check('ENHANCE → 固定用知识问答 Agent（不分派）',
+    byType.ENHANCE?.agentType === 'knowledge', `agent=${byType.ENHANCE?.agentType}`);
+  check('SIMPLE → 不经过 Agent（对比基线）',
+    byType.SIMPLE?.agentType === 'simple', `agent=${byType.SIMPLE?.agentType}`);
+
+  // ★ 这是"多 Agent 到底贵多少"的直接答案：ROUTE 多一次路由调用
+  check('★★ ROUTE 的 prompt token 高于 ENHANCE（路由开销被计入本轮总量）',
+    Number(byType.ROUTE?.promptTokens) > Number(byType.ENHANCE?.promptTokens),
+    `ROUTE=${byType.ROUTE?.promptTokens}（其中路由 ${byType.ROUTE?.routePromptTokens}）vs ENHANCE=${byType.ENHANCE?.promptTokens}`);
+  check('ENHANCE / SIMPLE 没有路由开销',
+    Number(byType.ENHANCE?.routePromptTokens || 0) === 0
+    && Number(byType.SIMPLE?.routePromptTokens || 0) === 0);
+
+  const bogus = await call('POST', CHAT_API, { body: { content: qSame, chatType: 'NOT_A_TYPE' }, token });
+  check('★ 非法 chatType 不报错、兜底到默认策略（配置错误不该让服务不可用）',
+    bogus.status === 200 && bogus.json?.data?.chatType === 'ROUTE',
+    `chatType=${bogus.json?.data?.chatType}`);
+
+  const afterOverride = await call('POST', CHAT_API, { body: { content: qSame }, token });
+  check('请求级覆盖是"一次性"的（不带参数时仍用配置默认策略）',
+    afterOverride.json?.data?.chatType === 'ROUTE',
+    `chatType=${afterOverride.json?.data?.chatType}`);
+
+  // ==================== 10. Prompt 外置（M6-2） ====================
+  section('10. ★ 提示词外置（Nacos 热更新 + 三级兜底）');
+
+  const promptRes = await call('GET', '/ais/chat/prompts', { token });
+  const promptMap = promptRes.json?.data || {};
+  check('提示词来源接口返回全部 6 项（5 个 Agent + 基线）',
+    Object.keys(promptMap).length === 6, `项数=${Object.keys(promptMap).length}`);
+  check('★ 每项都有明确的来源（能查"当前到底用的哪一份"）',
+    Object.values(promptMap).every((v) => v && v.length > 0),
+    JSON.stringify(promptMap));
+  check('提示词内容不直接返回（含业务规则，不该给任何登录用户看）',
+    !JSON.stringify(promptMap).includes('你是 FitMind'),
+    '接口只返回来源与长度');
+
+  // 提示词真的进了 prompt —— 用 Mock 的 prompt 快照做直接证据
+  await call('POST', CHAT_API, { body: { content: '提示词注入验证', chatType: 'SIMPLE' }, token });
+  const snap0 = redis('LINDEX', MOCK_SNAPSHOT_KEY, '0') || '';
+  check('★ 提示词（system 人设）确实被送进了模型 prompt',
+    snap0.includes('FitMind'), `快照前 40 字=${snap0.slice(0, 40)}`);
+
+  // ★ Nacos 热更新：发布 → 等 TTL → 生效 → 清理
+  //   ⚠️ 等待时长取决于 fm.ai.prompt.nacos.refresh-interval-ms（默认 30s）。
+  //      验收建议用 AIGC_PROMPT_REFRESH_MS=5000 启动服务，否则这里要等 35 秒。
+  const NACOS_MARK = '【验收标记-' + Date.now() + '】';
+  try {
+    const tokenRes = await fetch('http://localhost:8848/nacos/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'username=nacos&password=nacos',
+    });
+    const nacosToken = (await tokenRes.json()).accessToken;
+    const publish = await fetch('http://localhost:8848/nacos/v1/cs/configs', {
+      method: 'POST',
+      body: new URLSearchParams({
+        dataId: 'fm-aigc-prompt-simple', group: 'DEFAULT_GROUP', tenant: 'public',
+        type: 'text', accessToken: nacosToken,
+        content: NACOS_MARK + '你是 FitMind 的 AI 健身教练，这条来自 Nacos 配置中心。',
+      }),
+    });
+    check('能向 Nacos 发布提示词配置', (await publish.text()).trim() === 'true');
+
+    // 等 TTL 过期（默认 30s → 等 35s）
+    const waitMs = 35_000;
+    console.log(`    （等 ${waitMs / 1000} 秒让提示词缓存过期…）`);
+    await sleep(waitMs);
+
+    const after = await call('GET', '/ais/chat/prompts', { token });
+    const simpleSrc = after.json?.data?.simple || '';
+    check('★★ 改 Nacos 后提示词在 TTL 内生效（不需要重启服务）',
+      simpleSrc.includes('nacos'), `simple 来源=${simpleSrc}`);
+
+    await call('POST', CHAT_API, { body: { content: '验证 Nacos 生效', chatType: 'SIMPLE' }, token });
+    const snap1 = redis('LINDEX', MOCK_SNAPSHOT_KEY, '0') || '';
+    check('★★ Nacos 上的提示词内容确实进了 prompt（快照含验收标记）',
+      snap1.includes(NACOS_MARK), `快照前 40 字=${snap1.slice(0, 40)}`);
+
+    // 清理：删掉验收用的配置，让环境回到"本地提示词"状态
+    const del = await fetch('http://localhost:8848/nacos/v1/cs/configs?' + new URLSearchParams({
+      dataId: 'fm-aigc-prompt-simple', group: 'DEFAULT_GROUP', tenant: 'public', accessToken: nacosToken,
+    }), { method: 'DELETE' });
+    check('验收配置已从 Nacos 清理', (await del.text()).trim() === 'true');
+  } catch (e) {
+    check('Nacos 提示词链路验证（连接 Nacos 失败）', false, String(e).slice(0, 120));
+  }
+
+  // ==================== 11. 清理与自检 ====================
+  section('11. 清理与自检');
   aiCleanup();
   const leftSession = sql(`SELECT COUNT(*) FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`);
   const leftMsg = sql(`SELECT COUNT(*) FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID}`);
