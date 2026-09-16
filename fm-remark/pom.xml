@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.fitmind</groupId>
+        <artifactId>fitmind</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>fm-remark</artifactId>
+    <description>点赞服务：统一点赞能力（Redis 判重计数 + 异步同步到业务方），跨业务通用</description>
+
+    <dependencies>
+        <!-- 内部模块 -->
+        <dependency>
+            <groupId>com.fitmind</groupId>
+            <artifactId>fm-common</artifactId>
+        </dependency>
+        <!-- 跨服务契约：LikedTimesDTO（点赞数变更消息体） -->
+        <dependency>
+            <groupId>com.fitmind</groupId>
+            <artifactId>fm-api</artifactId>
+        </dependency>
+        <!-- 资源服务鉴权 SDK：把网关透传的用户信息放入 UserContext -->
+        <dependency>
+            <groupId>com.fitmind</groupId>
+            <artifactId>fm-auth-resource-sdk</artifactId>
+        </dependency>
+
+        <!-- Web -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- 服务注册发现 -->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+
+        <!-- ⚠️ 即使本服务自己不写 Feign 客户端，也必须引 openfeign：
+             fm-api 的 FeignOriginConfig 引用了 feign.RequestInterceptor，
+             而 @SpringBootApplication(scanBasePackages="com.fitmind") 会扫到它 ——
+             缺依赖会在启动时报 NoClassDefFoundError: feign/RequestInterceptor。
+             这是"依赖 fm-api 就必须引 openfeign"这条契约的代价（见 FeignOriginConfig 注释）。 -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-openfeign</artifactId>
+        </dependency>
+
+        <!-- 消息队列：点赞数变更通知业务方（覆盖更新，无需业务方回执） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+
+        <!-- ★ Redis：点赞的判重（Set）与计数（SCARD）全靠它，是写路径的主存储 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- ★ XXL-JOB 执行器：跑 likedTimesSyncJob（每 20 秒把脏标批量刷给业务方）。
+             常见实现用 @Scheduled(fixedDelay=20000)，我们换成 XXL-JOB 以便执行记录可见、失败可重试 -->
+        <dependency>
+            <groupId>com.xuxueli</groupId>
+            <artifactId>xxl-job-core</artifactId>
+            <version>${xxl-job-version}</version>
+        </dependency>
+
+        <!-- 持久层：liked_record 是点赞明细的「永久凭证」（Redis 只是热数据） -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-jsqlparser</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>mysql</groupId>
+            <artifactId>mysql-connector-java</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

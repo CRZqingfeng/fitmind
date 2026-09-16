@@ -1,0 +1,98 @@
+server:
+  port: 8088
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-trade
+  profiles:
+    active: local
+
+  # ==================== RabbitMQ ====================
+  # M4-1 只声明交换机（生产方声明交换机、消费方声明队列）
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+
+# ==================== 业务配置 ====================
+fm:
+  auth:
+    resource:
+      enable: true
+      includeLoginPaths:
+        # 购物车与订单都是"我的"，必须知道当前用户是谁
+        - /carts/**
+        - /orders/**
+      excludeLoginPaths:
+        - /health
+
+# ==================== 交易业务参数 ====================
+trade:
+  cart:
+    # 购物车最多放几门课（防刷，常见实现也是 10）
+    max-course-amount: 10
+  order:
+    # 下单后多少分钟未支付自动关闭
+    pay-over-minutes: 30
+    # 兜底扫描的宽限分钟数：只扫「创建时间早于 now - (payOver + grace)」的订单。
+    # 比正常超时多留一截，避免正常到期的订单被延迟队列和兜底扫描同时处理
+    timeout-scan-grace-minutes: 5
+    # 单次任务最多处理多少笔（防止一轮跑太久、失败影响面过大）
+    timeout-cancel-batch: 100
+
+# ==================== XXL-JOB 执行器 ====================
+xxl:
+  job:
+    admin:
+      addresses: ${XXL_JOB_ADMIN:http://127.0.0.1:9090/xxl-job-admin}
+    accessToken: ${XXL_JOB_TOKEN:default_token}
+    executor:
+      appname: fm-trade
+      # ⚠️ 执行器通讯端口每个服务必须不同（learning 9995 / media 9996 / remark 9997）
+      port: ${XXL_EXECUTOR_PORT:9998}
+      logPath: ./logs/xxl-job/fm-trade
+      logRetentionDays: 7
+
+# ==================== 本地开发环境 ====================
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_trade?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: 127.0.0.1
+      port: ${REDIS_PORT:16379}
+      password: 123456
+      database: 0
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug

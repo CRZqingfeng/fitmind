@@ -1,0 +1,91 @@
+server:
+  port: 8091
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-message
+  profiles:
+    active: local
+
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+
+fm:
+  auth:
+    resource:
+      enable: true
+      includeLoginPaths:
+        # 用户端：只有本人能看自己的消息（服务端再按 UserContext 过滤一次）
+        - /messages/**
+        # 管理端：模板 / 公告（另有 AdminAuthInterceptor 校验管理员身份）
+        # ★ 所有管理端接口统一放 /admin/** 下 —— 用路径前缀表达权限，比逐方法写角色判断更难漏
+        - /admin/**
+      excludeLoginPaths:
+        # ⚠️ /internal/** 是服务间调用（Feign 没有 JWT），必须放行；
+        #    它的安全边界是"只有我们的服务会构造这个请求"（不出现在网关对外文档里）
+        - /health
+
+# ==================== 站内信业务参数 ====================
+message:
+  # 公告的默认有效期（月）。与私信分开：公告是"一段时间内的通知"，私信要留得久些
+  notice-ttl-months: 1
+  # 定向通知（含业务通知）的默认有效期
+  message-ttl-months: 6
+  # ★ 短信是否走 Mock（本地开发 true）：Mock 只记录到 sms_record 表 + 打日志，
+  #   走的是与真实渠道完全相同的代码路径，只是"第三方"换成自己 —— 这样验收可以自动化
+  sms-mock: true
+
+# ==================== XXL-JOB 执行器 ====================
+xxl:
+  job:
+    admin:
+      addresses: ${XXL_JOB_ADMIN:http://127.0.0.1:9090/xxl-job-admin}
+    accessToken: ${XXL_JOB_TOKEN:default_token}
+    executor:
+      appname: fm-message
+      port: ${XXL_EXECUTOR_PORT:10001}
+      logPath: ./logs/xxl-job/fm-message
+      logRetentionDays: 7
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_message?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: 127.0.0.1
+      port: ${REDIS_PORT:16379}
+      database: 0
+
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug

@@ -1,0 +1,79 @@
+server:
+  port: 8084
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-course
+  profiles:
+    active: local
+
+  # ==================== RabbitMQ ====================
+  # 课程上下架后发消息，由 fm-search（M2-3）消费并同步 ES 索引。
+  # 注意：必须写在已有 spring 块内——同一 YAML 文档里再写一个顶层 spring: 会触发
+  #      DuplicateKeyException（已踩过）
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+
+# ==================== 业务配置 ====================
+fm:
+  # 短信为 Mock：验证码只打日志，并随接口响应返回，方便本地调试。生产环境请置 false
+  sms:
+    mock: true
+  auth:
+    resource:
+      # 开启登录拦截（与网关形成双重防护，直连服务端口时同样受保护）
+      enable: true
+      includeLoginPaths:
+        - /categorys/**
+        - /courses/**
+      excludeLoginPaths:
+        # 内部 Feign 调用不走网关，没有 token，必须放行
+        - /courses/internal/**
+        - /health
+
+# ==================== 本地开发环境 ====================
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_course?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: 127.0.0.1
+      port: ${REDIS_PORT:16379}
+      password: 123456
+      database: 0
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug
+    com.fitmind.user.mapper: debug

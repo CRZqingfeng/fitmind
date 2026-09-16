@@ -1,0 +1,76 @@
+server:
+  port: 8082
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-user
+  profiles:
+    active: local
+
+# ==================== 业务配置 ====================
+fm:
+  # 短信为 Mock：验证码只打日志，并随接口响应返回，方便本地调试。生产环境请置 false
+  sms:
+    mock: true
+  auth:
+    resource:
+      # 开启登录拦截（与网关形成双重防护，直连服务端口时同样受保护）
+      enable: true
+      includeLoginPaths:
+        - /users/**
+      excludeLoginPaths:
+        # 注意：Spring MVC 的路径匹配只针对「路径」，不支持 METHOD:/path 写法
+        # （METHOD: 前缀只在本项目网关的自定义匹配中支持）
+        - /codes
+        - /students/register
+        - /students/password
+        - /users/checkCellphone
+        - /health
+        # 服务间调用接口：由网关鉴权体系之外的内部调用使用
+        - /users/detail/**
+        - /users/list
+        - /users/ids
+        - /users/coaches
+
+# ==================== 本地开发环境 ====================
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_user?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: 127.0.0.1
+      port: ${REDIS_PORT:16379}
+      password: 123456
+      database: 0
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug
+    com.fitmind.user.mapper: debug

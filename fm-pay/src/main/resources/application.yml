@@ -1,0 +1,91 @@
+server:
+  port: 8089
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-pay
+  profiles:
+    active: local
+
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+
+fm:
+  auth:
+    resource:
+      enable: true
+      includeLoginPaths:
+        # 申请支付、查支付结果都要知道是谁
+        - /pay-orders/**
+        - /mock/**
+      excludeLoginPaths:
+        # ⚠️ 第三方支付回调走公网，不会带我们的 JWT —— 必须放行，
+        #    安全性由「验签」保证（NotifyController 里校验签名）
+        - /notify/**
+        - /health
+
+# ==================== 支付业务参数 ====================
+pay:
+  # 支付单多久过期（分钟）
+  order-expire-minutes: 30
+  # 回调验签用的密钥（Mock 渠道也走同一套验签流程）
+  sign-key: fitmind-pay-sign-key
+  mock:
+    # Mock 渠道"支付成功"后是否自动回调（false 时需手动调 /ps/mock/pay/{no}）
+    auto-notify: false
+
+# ==================== XXL-JOB 执行器（预留，M4-2 暂无任务） ====================
+xxl:
+  job:
+    admin:
+      addresses: ${XXL_JOB_ADMIN:http://127.0.0.1:9090/xxl-job-admin}
+    accessToken: ${XXL_JOB_TOKEN:default_token}
+    executor:
+      appname: fm-pay
+      port: ${XXL_EXECUTOR_PORT:9999}
+      logPath: ./logs/xxl-job/fm-pay
+      logRetentionDays: 7
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_pay?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: 127.0.0.1
+      port: ${REDIS_PORT:16379}
+      password: 123456
+      database: 0
+
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug

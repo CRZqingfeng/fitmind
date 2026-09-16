@@ -1,0 +1,100 @@
+server:
+  port: 8093
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-data
+  profiles:
+    active: local
+
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+    # ★ 数据中心不需要生产者确认：统计少一条不影响业务，
+    #   但消费失败必须能被发现（靠日志），所以不开自动删除队列
+    listener:
+      simple:
+        retry:
+          enabled: true
+          max-attempts: 2
+
+  data:
+    redis:
+      # ⚠️ 注意端口是 16379 不是 6379（Windows 保留端口段盖住了 6379）
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:16379}
+      # ⚠️ 默认值必须与 docker 里的 redis 密码一致（其它服务都是硬编码 123456）。
+      #    我第一版写成 `${REDIS_PASSWORD:}`（空默认值），而 REDIS_PASSWORD 这个环境变量
+      #    在宿主机上根本没导出 → 连上去直接 NOAUTH。
+      #    症状很有迷惑性：**去重表写进去了，但计数全是 0** ——
+      #    因为 dedup 的 insert 成功了，紧接着的 HINCRBY 抛异常被 safe() 吞掉。
+      password: ${REDIS_PASSWORD:123456}
+      database: 0
+
+fm:
+  auth:
+    resource:
+      enable: true
+      includeLoginPaths:
+        # 数据中心只服务管理端：运营看板
+        - /admin/**
+      excludeLoginPaths:
+        - /health
+
+# ==================== 数据中心业务参数 ====================
+data:
+  # Redis 日计数的 key 过期时间（小时）。
+  # 为什么不是不过期：定时落库任务会清掉已落库的 key，
+  # 但万一任务挂了，不能让这些计数永久占着内存 —— 留 72 小时足够人工发现并补跑。
+  counter-ttl-hours: 72
+  # 销量榜 Top N
+  top-n: 10
+
+# ==================== XXL-JOB 执行器（定时落库） ====================
+xxl:
+  job:
+    admin:
+      addresses: ${XXL_JOB_ADMIN:http://127.0.0.1:9090/xxl-job-admin}
+    accessToken: ${XXL_JOB_TOKEN:default_token}
+    executor:
+      appname: fm-data
+      port: ${XXL_EXECUTOR_PORT:10002}
+      logPath: ./logs/xxl-job/fm-data
+      logRetentionDays: 7
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_data?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug

@@ -1,0 +1,107 @@
+server:
+  port: 8083
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-media
+  profiles:
+    active: local
+
+# ==================== 业务配置 ====================
+fm:
+  # 短信为 Mock：验证码只打日志，并随接口响应返回，方便本地调试。生产环境请置 false
+  sms:
+    mock: true
+  auth:
+    resource:
+      # 开启登录拦截（与网关形成双重防护，直连服务端口时同样受保护）
+      enable: true
+      includeLoginPaths:
+        - /files/**
+        - /medias/**
+      excludeLoginPaths:
+        # 注意：Spring MVC 的路径匹配只针对「路径」，不支持 METHOD:/path 写法
+        # （METHOD: 前缀只在本项目网关的自定义匹配中支持）
+        # 内部 Feign 调用没有 token，必须放行，否则课程模块查不到媒资
+        - /medias/internal/**
+        - /students/register
+        - /students/password
+        - /users/checkCellphone
+        - /health
+        # 服务间调用接口：由网关鉴权体系之外的内部调用使用
+        - /users/detail/**
+        - /users/list
+        - /users/ids
+
+# ==================== XXL-JOB 执行器 ====================
+xxl:
+  job:
+    admin:
+      addresses: ${XXL_JOB_ADMIN:http://127.0.0.1:9090/xxl-job-admin}
+    accessToken: ${XXL_JOB_TOKEN:default_token}
+    executor:
+      appname: fm-media
+      # ⚠️ 执行器通讯端口每个服务必须不同（fm-learning 用 9995）
+      port: ${XXL_EXECUTOR_PORT:9996}
+      logPath: ./logs/xxl-job/fm-media
+      logRetentionDays: 7
+
+# ==================== 本地开发环境 ====================
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_media?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: 127.0.0.1
+      port: ${REDIS_PORT:16379}
+      password: 123456
+      database: 0
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug
+    com.fitmind.user.mapper: debug
+
+# ==================== MinIO 对象存储 ====================
+# 凭据一律走环境变量注入（真实值在 docker/.env），不写死进 git。
+# endpoint        —— SDK 内部调用用的地址（服务在宿主机跑，所以用 localhost）
+# public-endpoint —— 生成给浏览器的预签名 URL 用的地址
+#    ⚠️ 这两个必须分开配。MinIO 的 SigV4 签名把 Host 头算进签名，
+#       用 A 地址签的 URL 拿去 B 地址访问会 403 SignatureDoesNotMatch。
+#       将来部署到容器网络时，endpoint 换成 fm-minio:9000，public-endpoint 换成外网域名。
+fm:
+  minio:
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+    public-endpoint: ${MINIO_PUBLIC_ENDPOINT:http://localhost:9000}
+    access-key: ${MINIO_ACCESS_KEY:}
+    secret-key: ${MINIO_SECRET_KEY:}
+    bucket: ${MINIO_BUCKET:fitmind}
+    upload-expire: 3600
+    play-expire: 7200

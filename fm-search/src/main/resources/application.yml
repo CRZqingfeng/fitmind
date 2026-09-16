@@ -1,0 +1,86 @@
+server:
+  port: 8085
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-search
+  profiles:
+    active: local
+
+  # ==================== RabbitMQ ====================
+  # 消费 fm-course 发出的课程上下架消息，同步 ES 索引。
+  # 注意：必须写在已有 spring 块内——同一 YAML 文档里再写一个顶层 spring: 会触发
+  #      DuplicateKeyException（M2-2a 已踩过）
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+    listener:
+      simple:
+        # 逐条处理：索引同步涉及跨服务调用（Feign 拉课程数据），并发高了容易压垮 fm-course；
+        # 而且同一课程重复消费要能被幂等吸收，串行更简单可靠。
+        concurrency: 1
+        prefetch: 1
+
+# ==================== 业务配置 ====================
+fm:
+  auth:
+    resource:
+      # 开启登录拦截（与网关形成双重防护，直连服务端口时同样受保护）
+      enable: true
+      includeLoginPaths:
+        # ⚠️ 搜索是公开的——游客也要能逛课程，所以 /courses/** 不在这里
+        - /interests/**
+        - /recommend/**
+      excludeLoginPaths:
+        # 内部批量上下架索引的接口，由服务间调用（无 token）
+        - /courses/up
+        - /courses/down
+        - /health
+
+# ==================== Elasticsearch ====================
+elasticsearch:
+  # ⚠️ 这里写宿主机地址 9201（容器内是 9200，映射到宿主机 9201，因为 9200 被占用）。
+  #    将来部署到容器内时换成 http://fm-es:9200。
+  host: ${ES_HOST:127.0.0.1}
+  port: ${ES_PORT_NUM:9201}
+  index: ${ES_COURSE_INDEX:fitmind_course}
+
+# ==================== 本地开发环境 ====================
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_search?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+
+# ==================== MyBatis-Plus ====================
+# 只用于 interests（用户兴趣）表，索引数据本身全在 ES
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: input
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug

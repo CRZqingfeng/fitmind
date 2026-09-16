@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE properties SYSTEM "http://java.sun.com/dtd/properties.dtd">
+<properties>
+	<comment>IK Analyzer 扩展配置 —— FitMind 健身领域词典</comment>
+	<!--
+	  为什么要自定义词典：
+	  IK 自带的是通用中文语料，健身领域几乎全是生词。实测默认词库下
+	  「增肌」被切成「增/肌」、「硬拉」被切成「硬/拉」，
+	  导致搜「增肌」会把「肌肉增长」「增加」一并召回，精度大跌。
+	  加上下面这份词典后，8 个测试词里 6 个被救回。
+
+	  词典文件与项目一起纳入版本管理，通过 docker-compose 绑定挂载进容器，
+	  所以 docker-compose up 之后词典自动生效，不需要手工进容器改配置。
+	-->
+	<entry key="ext_dict">fitmind.dic</entry>
+	<!--用户可以在这里配置自己的扩展停止词字典-->
+	<entry key="ext_stopwords"></entry>
+	<!--用户可以在这里配置远程扩展字典-->
+	<!-- <entry key="remote_ext_dict">words_location</entry> -->
+	<!--用户可以在这里配置远程扩展停止词字典-->
+	<!-- <entry key="remote_ext_stopwords">words_location</entry> -->
+</properties>

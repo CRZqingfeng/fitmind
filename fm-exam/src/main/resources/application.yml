@@ -1,0 +1,72 @@
+server:
+  port: 8092
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-exam
+  profiles:
+    active: local
+
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+
+fm:
+  auth:
+    resource:
+      enable: true
+      includeLoginPaths:
+        # 学员端：体测记录 / 考核提交（服务端按 UserContext 过滤，只能看自己的）
+        - /assessments/**
+        - /action-assessments/**
+        # 管理端：教练评分、查看他人的考核（另有 AdminAuthInterceptor 校验管理员/教练身份）
+        - /admin/**
+      excludeLoginPaths:
+        - /health
+
+# ==================== 体测业务参数 ====================
+exam:
+  # 体测记录保留多少个月（用于趋势图的时间窗口）
+  trend-months: 24
+  # ★ 性别未知时的兜底策略：true = 用"中性"标准（男女区间的中间值）并在结论里注明；
+  #   false = 直接拒绝评估。
+  #   选 true 是因为"给一个带说明的粗略结论"比"什么都不给"有用，
+  #   但绝不能静默按某一性别算 —— 那会给出看似精确实则错误的数字。
+  allow-unknown-gender: true
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_exam?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug

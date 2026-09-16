@@ -1,0 +1,141 @@
+server:
+  port: 10010
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-gateway
+  profiles:
+    active: local
+
+# ==================== 鉴权配置 ====================
+fm:
+  auth:
+    # 完全放行：连 token 都不解析（登录、注册等公开接口）
+    excludePath:
+      - POST:/as/accounts/login
+      - POST:/as/accounts/admin/login
+      - GET:/as/accounts/refresh
+      - POST:/us/codes
+      - POST:/us/students/register
+      # 接口文档与健康检查
+      - /doc.html
+      - /webjars/**
+      - /swagger-resources/**
+      - /v3/api-docs/**
+      - /favicon.ico
+    # 需要登录：token 无效时网关直接返回 401
+    requireLoginPath:
+      - /us/**
+      - /as/**
+      - /cs/**
+      - /ls/**
+      - /ms/**
+      - /ts/**
+      - /ps/**
+      - /es/**
+      - /prs/**
+      - /rs/**
+      - /ds/**
+      - /sms/**
+      - /ais/**
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+    gateway:
+      # ==================== 路由规则 ====================
+      # 约定：请求路径前缀 -> 微服务，配合全局 StripPrefix=1 去掉前缀
+      #       例：/us/users/me  ->  fm-user 的 /users/me
+      routes:
+        - id: us
+          uri: lb://fm-user
+          predicates:
+            - Path=/us/**
+        - id: as
+          uri: lb://fm-auth
+          predicates:
+            - Path=/as/**
+        - id: cs
+          uri: lb://fm-course
+          predicates:
+            - Path=/cs/**
+        - id: ls
+          uri: lb://fm-learning
+          predicates:
+            - Path=/ls/**
+        - id: ss
+          uri: lb://fm-search
+          predicates:
+            - Path=/ss/**
+        - id: ms
+          uri: lb://fm-media
+          predicates:
+            - Path=/ms/**
+        - id: ts
+          uri: lb://fm-trade
+          predicates:
+            - Path=/ts/**
+        - id: ps
+          uri: lb://fm-pay
+          predicates:
+            - Path=/ps/**
+        - id: es
+          uri: lb://fm-exam
+          predicates:
+            - Path=/es/**
+        - id: prs
+          uri: lb://fm-promotion
+          predicates:
+            - Path=/prs/**
+        - id: rs
+          uri: lb://fm-remark
+          predicates:
+            - Path=/rs/**
+        - id: ds
+          uri: lb://fm-data
+          predicates:
+            - Path=/ds/**
+        - id: sms
+          uri: lb://fm-message
+          predicates:
+            - Path=/sms/**
+        - id: ais
+          uri: lb://fm-aigc
+          predicates:
+            - Path=/ais/**
+      # 全局过滤器：去掉第一层路径前缀
+      default-filters:
+        - StripPrefix=1
+      # 全局跨域配置，方便前端联调
+      globalcors:
+        add-to-simple-url-handler-mapping: true
+        corsConfigurations:
+          '[/**]':
+            allowedOriginPatterns:
+              - "*"
+            allowedMethods:
+              - GET
+              - POST
+              - DELETE
+              - PUT
+              - OPTIONS
+            allowedHeaders: "*"
+            allowCredentials: true
+            maxAge: 360000
+
+logging:
+  level:
+    com.fitmind: debug
+    org.springframework.cloud.gateway: info

@@ -1,0 +1,72 @@
+# ==================== Java / Maven ====================
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+*.class
+*.jar
+*.war
+*.ear
+
+# ==================== IDE ====================
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+
+# ==================== 日志 ====================
+logs/
+*.log
+log/
+
+# ==================== 本地配置与密钥（严禁入库） ====================
+*.local.yml
+*.local.yaml
+*.local.properties
+application-local.yml
+application-local.yaml
+.env.local
+.env.*.local
+
+# ★★ 本地环境变量文件：docker/.env 里是**真实的密码与 API Key**
+#    （REDIS_PASSWORD / MINIO_ROOT_PASSWORD / NACOS_AUTH_TOKEN / DEEPSEEK_API_KEY / DASHSCOPE_API_KEY）
+#
+#    ⚠️ 这里原本写的是 `!docker/.env` —— 那是 git 的**取消忽略**语法，
+#       语义与"忽略"正好相反，会让这个文件**被提交进仓库**。
+#       写这一行时的意图是"这条规则不适用"，但 git 的取反语法很容易被误读成
+#       "确保被忽略"。**准备首次提交、逐条核对 git status 时才发现。**
+#
+#    正确做法：忽略真实 .env，另外提供一个只有占位符的 .env.example
+docker/.env
+docker/.env.local
+!.env.example
+!docker/.env.example
+
+# 证书 / 密钥库
+*.jks
+*.p12
+*.pem
+*.key
+*.crt
+
+# ==================== Docker 数据卷 ====================
+docker/data/
+
+# ==================== 前端 ====================
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+frontend/**/pnpm-lock.yaml
+
+# ==================== 临时文件 ====================
+.tmp/
+*.tmp
+*.bak
+*.orig
+.DS_Store
+Thumbs.db

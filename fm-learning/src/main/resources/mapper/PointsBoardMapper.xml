@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.fitmind.learning.mapper.PointsBoardMapper">
+
+    <!--
+        动态创建赛季分表。
+
+        ★ 设计要点：id 即排名。
+          月度结算把 ZSet 从高到低分页插入，自增 id 天然等于插入顺序即排名，
+          省掉一个 rank 列的维护成本（分表是"一次写入、之后只读"的冷数据，正合适）。
+
+        ⚠️ 表名用 ${tableName} 而不是 #{}：
+           DDL 里的表名不能用预编译占位符，必须拼接；而拼接的值由代码生成
+           （points_board_ + 赛季id，赛季id 来自数据库不是外部输入），不存在注入风险。
+    -->
+    <update id="createPointsBoardTable" parameterType="java.lang.String">
+        CREATE TABLE IF NOT EXISTS `${tableName}`
+        (
+            `id`      BIGINT NOT NULL AUTO_INCREMENT COMMENT '排名',
+            `user_id` BIGINT NOT NULL COMMENT '用户id',
+            `points`  INT    NOT NULL COMMENT '积分',
+            PRIMARY KEY (`id`),
+            INDEX `idx_user_id` (`user_id`)
+        ) ENGINE = InnoDB
+          DEFAULT CHARSET = utf8mb4 COMMENT = '积分榜（按赛季分表）'
+    </update>
+</mapper>

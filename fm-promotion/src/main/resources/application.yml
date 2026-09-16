@@ -1,0 +1,84 @@
+server:
+  port: 8090
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-promotion
+  profiles:
+    active: local
+
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+
+fm:
+  auth:
+    resource:
+      enable: true
+      includeLoginPaths:
+        - /coupons/**
+        - /user-coupons/**
+        - /exchange-codes/**
+        - /discount/**
+      excludeLoginPaths:
+        - /health
+
+# ==================== 促销业务参数 ====================
+promotion:
+  # ★ 叠加推荐的计算超时（毫秒）。
+  #   券一多，方案数是阶乘级增长的 —— 超时后返回"已算出的最优解"，
+  #   宁可少算几个方案，也不能让下单接口卡住。
+  solution-timeout-ms: 1000
+  # 参与排列组合的最大券数（超过就只算单券方案，防爆炸）
+  max-permute-coupons: 6
+
+# ==================== XXL-JOB ====================
+# ⚠️ 本服务**不使用** XXL-JOB：促销模块没有定时任务
+#    （券的过期靠有效期字段过滤，榜单结算是 fm-learning 的任务）。
+#    原先这里留着一段 xxl.job 配置，但 pom 里并没有引 xxl-job-core ——
+#    于是它是**死配置**：不报错、不生效、也看不出问题，
+#    还让人误以为"fm-promotion 有执行器（10000）"。
+#    不需要就删掉，别留着误导人。判据见《本地环境排障手册》§3.15。
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_promotion?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: 127.0.0.1
+      port: ${REDIS_PORT:16379}
+      password: 123456
+      database: 0
+
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug

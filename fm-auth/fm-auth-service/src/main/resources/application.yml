@@ -1,0 +1,67 @@
+server:
+  port: 8081
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-auth
+  profiles:
+    active: local
+
+# ==================== JWT 密钥库 ====================
+fm:
+  encrypt:
+    key-store:
+      alias: fitmind           # 密钥别名
+      location: classpath:fitmind.jks
+      password: fm123321       # 密钥库密码
+      secret: fm123321         # 私钥密码
+      type: JKS
+  auth:
+    resource:
+      # 认证服务自身也需要鉴权：退出登录等接口必须登录后才能调用
+      enable: true
+      includeLoginPaths:
+        - /accounts/logout
+
+# ==================== 本地开发环境 ====================
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_auth?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: 127.0.0.1
+      port: ${REDIS_PORT:16379}
+      password: 123456
+      database: 0
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug
+    com.fitmind.auth.mapper: debug

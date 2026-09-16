@@ -1,0 +1,95 @@
+server:
+  port: 8087
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-remark
+  profiles:
+    active: local
+
+  # ==================== RabbitMQ ====================
+  # 点赞数变更 → 业务方（fm-learning）覆盖更新 liked_times
+  # 注意：必须写在已有 spring 块内（同一 YAML 文档里再写一个顶层 spring: 会触发 DuplicateKeyException）
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+
+# ==================== 业务配置 ====================
+fm:
+  auth:
+    resource:
+      enable: true
+      includeLoginPaths:
+        # 点赞与查点赞状态都需要登录（点赞要写当前用户，查状态要知道"我"是谁）
+        - /remarks/likes
+        - /remarks/likes/**
+      excludeLoginPaths:
+        # 【内部】故障恢复用：从 DB 重建 Redis 计数，由运维/脚本触发，不带 token
+        - /remarks/likes/rebuild
+        - /health
+
+# ==================== XXL-JOB 执行器 ====================
+xxl:
+  job:
+    admin:
+      addresses: ${XXL_JOB_ADMIN:http://127.0.0.1:9090/xxl-job-admin}
+    accessToken: ${XXL_JOB_TOKEN:default_token}
+    executor:
+      appname: fm-remark
+      # ⚠️ 执行器通讯端口每个服务必须不同（learning 9995 / media 9996）
+      port: ${XXL_EXECUTOR_PORT:9997}
+      logPath: ./logs/xxl-job/fm-remark
+      logRetentionDays: 7
+
+# ==================== 点赞同步参数 ====================
+remark:
+  likes:
+    # 单批弹出多少条（太小 → MQ 消息多；太大 → 单轮耗时长、失败影响面大）
+    sync-batch-size: 30
+    # 一次任务最多跑几轮（积压时连续排空，避免"每 20 秒只能同步 30 条"被追不上）
+    sync-max-rounds: 10
+
+# ==================== 本地开发环境 ====================
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_remark?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: 127.0.0.1
+      port: ${REDIS_PORT:16379}
+      password: 123456
+      database: 0
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug

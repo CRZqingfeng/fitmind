@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.fitmind</groupId>
+    <artifactId>fitmind</artifactId>
+    <version>1.0.0</version>
+    <packaging>pom</packaging>
+
+    <name>fitmind</name>
+    <description>FitMind AI 智能健身平台 —— 基于微服务架构的健身训练与 AI 教练平台</description>
+
+    <!-- ==================== 继承 Spring Boot 父工程 ==================== -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.5</version>
+        <relativePath/>
+    </parent>
+
+    <!-- ==================== 子模块 ==================== -->
+    <!-- 说明：采用渐进式搭建，其余模块（fm-learning / fm-trade / fm-pay /
+         fm-promotion / fm-exam / fm-remark / fm-data / fm-message / fm-aigc）
+         在对应里程碑创建后，逐个追加到这里。 -->
+    <modules>
+        <module>fm-common</module>
+        <module>fm-api</module>
+        <module>fm-auth</module>
+        <module>fm-media</module>
+        <module>fm-course</module>
+        <module>fm-search</module>
+        <module>fm-learning</module>
+        <module>fm-remark</module>
+        <module>fm-trade</module>
+        <module>fm-pay</module>
+        <module>fm-promotion</module>
+        <module>fm-message</module>
+        <module>fm-exam</module>
+        <module>fm-data</module>
+        <module>fm-gateway</module>
+        <module>fm-user</module>
+    </modules>
+
+    <!-- ==================== 版本统一管理 ==================== -->
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <fitmind.version>1.0.0</fitmind.version>
+        <org.projectlombok.version>1.18.36</org.projectlombok.version>
+
+        <spring-cloud.version>2023.0.3</spring-cloud.version>
+        <spring-cloud-alibaba.version>2023.0.3.2</spring-cloud-alibaba.version>
+        <spring-ai.version>1.0.0-M6</spring-ai.version>
+        <spring-ai-alibaba.version>1.0.0-M6.1</spring-ai-alibaba.version>
+
+        <mybatis-plus.version>3.5.9</mybatis-plus.version>
+        <hutool.version>5.8.36</hutool.version>
+        <knife4j.version>4.5.0</knife4j.version>
+        <swagger.version>2.2.19</swagger.version>
+        <mysql.version>8.0.23</mysql.version>
+        <redisson.version>3.13.6</redisson.version>
+        <xxl-job-version>2.3.1</xxl-job-version>
+        <minio.version>8.5.12</minio.version>
+        <!-- ES 客户端版本。取 7.17.10 而不是 Boot 默认的 8.x：
+             1) 服务端是 elasticsearch:7.17.22，客户端同小版本线最稳
+             2) 本地 Maven 仓库已有 7.17.10（连带 lucene 8.11.1），可离线构建 -->
+        <elasticsearch.version>7.17.10</elasticsearch.version>
+    </properties>
+
+    <!-- ==================== 依赖版本管理（只声明版本，不引入） ==================== -->
+    <dependencyManagement>
+        <dependencies>
+            <!-- 本工程内部模块 -->
+            <dependency>
+                <groupId>com.fitmind</groupId>
+                <artifactId>fm-common</artifactId>
+                <version>${fitmind.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fitmind</groupId>
+                <artifactId>fm-api</artifactId>
+                <version>${fitmind.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fitmind</groupId>
+                <artifactId>fm-auth-common</artifactId>
+                <version>${fitmind.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fitmind</groupId>
+                <artifactId>fm-auth-gateway-sdk</artifactId>
+                <version>${fitmind.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fitmind</groupId>
+                <artifactId>fm-auth-resource-sdk</artifactId>
+                <version>${fitmind.version}</version>
+            </dependency>
+
+            <!-- Spring Cloud -->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Spring Cloud Alibaba -->
+            <dependency>
+                <groupId>com.alibaba.cloud</groupId>
+                <artifactId>spring-cloud-alibaba-dependencies</artifactId>
+                <version>${spring-cloud-alibaba.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Spring AI -->
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- MyBatis-Plus -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-bom</artifactId>
+                <version>${mybatis-plus.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- 数据库驱动 -->
+            <dependency>
+                <groupId>mysql</groupId>
+                <artifactId>mysql-connector-java</artifactId>
+                <version>${mysql.version}</version>
+            </dependency>
+
+            <!-- 工具库 -->
+            <dependency>
+                <groupId>cn.hutool</groupId>
+                <artifactId>hutool-all</artifactId>
+                <version>${hutool.version}</version>
+            </dependency>
+
+            <!-- 接口文档 -->
+            <dependency>
+                <groupId>com.github.xiaoymin</groupId>
+                <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
+                <version>${knife4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.swagger.core.v3</groupId>
+                <artifactId>swagger-annotations</artifactId>
+                <version>${swagger.version}</version>
+            </dependency>
+
+            <!-- 分布式锁 -->
+            <dependency>
+                <groupId>org.redisson</groupId>
+                <artifactId>redisson</artifactId>
+                <version>${redisson.version}</version>
+            </dependency>
+
+            <!-- 对象存储 MinIO -->
+            <dependency>
+                <groupId>io.minio</groupId>
+                <artifactId>minio</artifactId>
+                <version>${minio.version}</version>
+            </dependency>
+
+            <!-- 分布式任务调度 -->
+            <dependency>
+                <groupId>com.xuxueli</groupId>
+                <artifactId>xxl-job-core</artifactId>
+                <version>${xxl-job-version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!-- ==================== 所有模块公共依赖 ==================== -->
+    <dependencies>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${org.projectlombok.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>jakarta.servlet</groupId>
+            <artifactId>jakarta.servlet-api</artifactId>
+            <version>6.0.0</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.13.0</version>
+                    <configuration>
+                        <source>17</source>
+                        <target>17</target>
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

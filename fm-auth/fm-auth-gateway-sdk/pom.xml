@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.fitmind</groupId>
+        <artifactId>fm-auth</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>fm-auth-gateway-sdk</artifactId>
+    <description>网关鉴权 SDK：供 fm-gateway 使用的全局过滤器与放行规则</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.fitmind</groupId>
+            <artifactId>fm-auth-common</artifactId>
+        </dependency>
+
+        <!-- 网关为 WebFlux 技术栈，标 provided 由网关自身引入 -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-gateway</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+</project>
