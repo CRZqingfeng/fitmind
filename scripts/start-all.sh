@@ -45,6 +45,33 @@ export DASHSCOPE_API_KEY="$(env_get DASHSCOPE_API_KEY)"
 XXL_TOKEN="$(env_get XXL_JOB_TOKEN)"
 export XXL_JOB_TOKEN="${XXL_TOKEN:-default_token}"
 
+# ==================== AI 模型通道（M6 fm-aigc） ====================
+# 用法（$2 或环境变量，优先级从左到右）：
+#   bash scripts/start-all.sh fm-aigc mock            强制 Mock（验收脚本用）
+#   bash scripts/start-all.sh fm-aigc deepseek        强制真实模型
+#   bash scripts/start-all.sh fm-aigc                 有 key 走 DeepSeek，没 key 自动降级 Mock
+#
+# ★ 为什么把选择逻辑放在这里，而不是让它散在 yml 里：
+#   provider 与 spring.ai.openai.chat.enabled 必须**同时**切换
+#   （provider=mock 时不关掉 OpenAI 自动配置，会同时存在两个 ChatModel Bean）。
+#   "两个开关要一致"是个很容易忘的约定 —— 封装成一处，就不会忘。
+AIGC_REQ="${2:-${AIGC_CHAT_PROVIDER:-}}"
+if [ "$AIGC_REQ" = "mock" ]; then
+    export AIGC_CHAT_PROVIDER="mock"
+    export AIGC_CHAT_ENABLED="false"
+    echo "★ fm-aigc 使用 Mock 模型通道（指定 mock）"
+elif [ "$AIGC_REQ" = "deepseek" ]; then
+    export AIGC_CHAT_PROVIDER="deepseek"
+    export AIGC_CHAT_ENABLED="true"
+elif [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+    export AIGC_CHAT_PROVIDER="mock"
+    export AIGC_CHAT_ENABLED="false"
+    echo "⚠️ 未配置 DEEPSEEK_API_KEY → fm-aigc 自动改用 Mock 模型通道（功能可跑，只是回答是确定性的）"
+else
+    export AIGC_CHAT_PROVIDER="deepseek"
+    export AIGC_CHAT_ENABLED="true"
+fi
+
 JAVA="/d/develop/jdk-17/bin/java"
 
 # 服务名 -> "端口 jar路径"

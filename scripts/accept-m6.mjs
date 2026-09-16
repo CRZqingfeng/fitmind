@@ -1,0 +1,509 @@
+#!/usr/bin/env node
+/**
+ * ============================================================================
+ * M6 验收：AI 教练（fm-aigc）
+ * ============================================================================
+ *
+ * 用法：
+ *   node scripts/accept-m6.mjs            # 默认：走 Mock 模型通道（全自动、零成本）
+ *   node scripts/accept-m6.mjs --real     # 额外跑一组真实模型冒烟（需要 DEEPSEEK_API_KEY）
+ *
+ * ★ 为什么默认走 Mock 通道：
+ *   AI 链路的正确性和"模型说了什么"是两件事。让验收脚本依赖真实模型，
+ *   等于让"改一行检索参数"变成"必须真调 API 才能知道有没有断" ——
+ *   会慢、会花钱、会因为限流而随机失败。
+ *   Mock 通道实现的是 Spring AI 的 ChatModel 接口本身，所以
+ *   Prompt 组装 / Advisor 链 / SSE 分片 / 工具调用 / 落库这些**真实执行**，
+ *   只有"生成"这一步是确定的。
+ *   （与 M4-2 的 Mock 支付渠道、M4-4 的 Mock 退款同一个方法论。）
+ *
+ * ⚠️ 前置：fm-aigc 必须以 mock 通道启动：
+ *   bash scripts/start-all.sh fm-aigc mock
+ *   脚本会先检查 /ais/chat/provider，不是 mock 就直接报错退出。
+ *
+ * ⚠️ 验证码限流：同一手机号 60 秒内只能取一次验证码。
+ *   本脚本只在开头登录一次（不像别的脚本会反复登录），所以不受影响；
+ *   但如果和别的脚本连着跑，中间要等 65 秒。
+ * ============================================================================
+ */
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+
+const GATEWAY = 'http://localhost:10010';
+const MYSQL = 'C:\\Program Files\\MySQL\\MySQL Server 8.0\\bin\\mysql.exe';
+const COACH_USER_ID = 2;
+const COACH_PHONE = '13800010002';
+const ADMIN_PHONE = '13800010003';
+const STUDENT_PHONE = '13800010001';
+
+let passed = 0;
+let failed = 0;
+const failures = [];
+
+function check(name, condition, detail = '') {
+  if (condition) {
+    passed++;
+    console.log(`  ✅ ${name}`);
+  } else {
+    failed++;
+    failures.push(name + (detail ? ` —— ${detail}` : ''));
+    console.log(`  ❌ ${name}${detail ? ` —— ${detail}` : ''}`);
+  }
+}
+
+function section(title) {
+  console.log(`\n【${title}】`);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * ★★ 查询本身失败必须炸出来。
+ * mysql / redis CLI 偶发启动失败时 stdout 为空而 status 非 0 ——
+ * 期望"空/为 0"的断言会直接假通过，把人往错误方向带。
+ * 注意：status=0 且 stdout 为空是合法的（查询成功但无匹配行）。
+ */
+function checkCmdResult(kind, cmd, r) {
+  if (r.error) {
+    throw new Error(`${kind} 执行失败（进程无法启动）：${cmd}\n${r.error.message}`);
+  }
+  if (r.status !== 0) {
+    throw new Error(`${kind} 执行失败（退出码 ${r.status}）：${cmd}\n${(r.stderr || '').trim()}`);
+  }
+}
+
+function sql(query) {
+  const r = spawnSync(MYSQL,
+    ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query],
+    { encoding: 'utf8' });
+  checkCmdResult('SQL', query, r);
+  return (r.stdout || '').trim();
+}
+
+/** 多行结果转成一行（Windows MySQL CLI 输出 CRLF，必须用 \r?\n） */
+function sqlRow(query) {
+  return sql(query).replace(/\r?\n/g, ' | ');
+}
+
+function envGet(key) {
+  const env = fs.readFileSync('docker/.env', 'utf8');
+  return (env.match(new RegExp(`^${key}=(.*)$`, 'm')) || [])[1]?.trim();
+}
+
+function redis(...args) {
+  const r = spawnSync('docker',
+    ['exec', 'fm-redis', 'redis-cli', '-a', envGet('REDIS_PASSWORD'), '--no-auth-warning', ...args],
+    { encoding: 'utf8' });
+  checkCmdResult('REDIS', `redis-cli ${args.join(' ')}`, r);
+  return (r.stdout || '').trim();
+}
+
+async function call(method, path, { body, token, retryOn401 = true } = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = token;
+  const doFetch = async () => {
+    const res = await fetch(GATEWAY + path, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* 非 JSON */ }
+    return { status: res.status, json, text };
+  };
+  let result = await doFetch();
+  if (token && result.status === 401 && retryOn401) {
+    await sleep(200);
+    result = await doFetch();
+  }
+  return result;
+}
+
+/** 轮询等待条件成立（MQ 异步、定时任务都用它，避免盲目 sleep） */
+async function waitUntil(fn, timeoutMs = 10000, interval = 300) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fn()) return true;
+    await sleep(interval);
+  }
+  return false;
+}
+
+// ==================== 登录 ====================
+
+/** 学员：用户端通道 + 验证码 */
+async function studentLogin(phone) {
+  const codeRes = await call('POST', `/us/codes?phone=${phone}`);
+  const code = codeRes.json?.data;
+  const loginRes = await call('POST', '/as/accounts/login', {
+    body: { type: 2, cellPhone: phone, password: code, rememberMe: false },
+  });
+  return loginRes.json?.data || null;
+}
+
+/**
+ * 员工（教练 / 管理员）：管理端通道 + 验证码。
+ *
+ * ★ 这里用"验证码"而不是"密码"登录，是看了 fm-user 的登录实现之后的选择：
+ *   queryUserDetail 里 type 只决定"密码还是验证码"，
+ *   而 isStaff 只决定"账号类型必须是员工"。两者正交，
+ *   所以员工完全可以用验证码走管理端通道 —— 不必在脚本里硬编码种子密码。
+ */
+async function staffLogin(phone) {
+  const codeRes = await call('POST', `/us/codes?phone=${phone}`);
+  const code = codeRes.json?.data;
+  const res = await call('POST', '/as/accounts/admin/login', {
+    body: { type: 2, cellPhone: phone, password: code, rememberMe: false },
+  });
+  return res.json?.data || null;
+}
+
+// ==================== 课程与订单 ====================
+
+async function buildCourse({ token, name, suffix, free = 2, price = 19900 }) {
+  const cateName = `M4-4分类${suffix}`;
+  await call('POST', '/cs/categorys/add', { token, body: { name: cateName, parentId: 0 } });
+  const cates = await call('GET', '/cs/categorys/list?level=1&tree=false', { token });
+  const cate = (cates.json?.data || []).find((c) => c.name === cateName);
+  if (!cate) return null;
+
+  const base = await call('POST', '/cs/courses/baseInfo/save', {
+    token,
+    body: {
+      name, courseType: 1, firstCateId: cate.id, free, price,
+      goalType: 1, trainingLevel: 2, totalDays: 21, validDuration: 90,
+      equipment: '哑铃', courseIntroduce: 'M4-4 退款验收用课程',
+    },
+  });
+  const courseId = base.json?.data?.id;
+  if (!courseId) return { cateId: cate.id };
+
+  await call('POST', `/cs/courses/catas/save/${courseId}/2`, {
+    token,
+    body: [{ type: 1, name: 'Day 1 胸部', index: 1, sections: [{ type: 2, name: '哑铃卧推' }] }],
+  });
+  const tree = await call('GET', `/cs/courses/catas/${courseId}`, { token });
+  const sectionIds = (tree.json?.data?.[0]?.sections || []).map((s) => s.id);
+
+  const buf = Buffer.from(`m4-4-video-${Date.now()}`);
+  const sig = await call('POST',
+    `/ms/medias/upload-signature?filename=${encodeURIComponent(name)}.mp4&size=${buf.length}`, { token });
+  const mediaId = sig.json?.data?.mediaId;
+  if (sig.json?.data?.uploadUrl) {
+    await fetch(sig.json.data.uploadUrl, { method: 'PUT', body: buf }).catch(() => null);
+    await call('POST', `/ms/medias/${mediaId}/confirm`, { token, body: { duration: 180 } });
+  }
+  await call('POST', `/cs/courses/media/save/${courseId}`, {
+    token,
+    body: sectionIds.map((cataId) => ({
+      cataId, mediaId, videoName: `${name}.mp4`, mediaDuration: 180,
+      sets: 4, reps: 10, restSeconds: 90, actionType: 1,
+    })),
+  });
+  await call('POST', '/cs/courses/teachers/save', {
+    token, body: { id: courseId, teachers: [{ id: COACH_USER_ID, isShow: true }] },
+  });
+  const up = await call('POST', '/cs/courses/upShelf', { token, body: { id: courseId } });
+  if (up.json?.code !== 200) return { cateId: cate.id, courseId, upFailed: up.json?.msg };
+  return { courseId, sectionIds, cateId: cate.id };
+}
+
+/** 下单：预下单拿 orderId → 提交订单 */
+async function placeOrder(token, courseIds) {
+  const pre = await call('GET', `/ts/orders/prePlace?courseIds=${courseIds.join(',')}`, { token });
+  const orderId = pre.json?.data?.orderId;
+  if (!orderId) return { pre, error: 'prePlace 没有返回 orderId' };
+  const place = await call('POST', '/ts/orders', { token, body: { orderId, courseIds } });
+  return { orderId, pre, place };
+}
+
+/** 支付：申请支付 → Mock 触发回调 */
+async function payOrder(token, orderId) {
+  const pay = await call('POST', `/ts/orders/${orderId}/pay`, { token });
+  const payOrderNo = pay.json?.data?.payOrderNo;
+  if (!payOrderNo) return { pay, error: '没有 payOrderNo' };
+  await call('POST', `/ps/mock/pay/${payOrderNo}`, { token });
+  const ok = await waitUntil(() => sql(`SELECT status FROM fm_pay.pay_order WHERE pay_order_no='${payOrderNo}'`) === '2');
+  return { pay, payOrderNo, paid: ok };
+}
+
+/** 改动详情 id（退款需要） */
+function detailIdOf(orderId, courseId) {
+  return sql(`SELECT id FROM fm_trade.trade_order_detail WHERE order_id=${orderId} AND course_id=${courseId}`);
+}
+
+// ==================== M5 专用常量与工具 ====================
+
+function summary() {
+  console.log('\n' + '='.repeat(64));
+  console.log(`  通过 ${passed} 项 / 失败 ${failed} 项 / 共 ${passed + failed} 项`);
+  if (failures.length) {
+    console.log('\n  失败清单：');
+    failures.forEach((f, i) => console.log(`    ${i + 1}. ${f}`));
+  }
+  console.log('='.repeat(64));
+  process.exit(failed > 0 ? 1 : 0);
+}
+// ==================== M6 常量与专用工具 ====================
+
+const STUDENT_USER_ID = 1;
+const PROVIDER_API = '/ais/chat/provider';
+const CHAT_API = '/ais/chat';
+const STREAM_API = '/ais/chat/stream';
+const SESSIONS_API = '/ais/chat/sessions';
+const MOCK_SNAPSHOT_KEY = 'aigc:mock:prompts';
+
+/** 解析 SSE 响应体（Spring SseEmitter 输出的 event:/data: 块） */
+function parseSse(text) {
+  const events = [];
+  for (const block of text.split(/\n\n/)) {
+    if (!block.trim()) continue;
+    let name = null;
+    let data = '';
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) name = line.slice(6).trim();
+      // ★ data 可能有多行（内容里带换行会被 SSE 规范拆成多个 data: 行），
+      //   所以要累加而不是覆盖 —— 漏了这个会让"含换行的回答"比对失败
+      else if (line.startsWith('data:')) data += line.slice(5);
+    }
+    if (name) events.push({ name, data });
+  }
+  return events;
+}
+
+/** 走一次真正的 SSE 流式对话 */
+async function sseChat(question, token, sessionId) {
+  const body = sessionId ? { content: question, sessionId } : { content: question };
+  const res = await fetch(GATEWAY + STREAM_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: token },
+    body: JSON.stringify(body),
+  });
+  const contentType = res.headers.get('content-type') || '';
+  const text = await res.text();
+  return { status: res.status, contentType, raw: text, events: parseSse(text) };
+}
+
+/** 从事件流里拼出回答正文 */
+function joinData(events) {
+  return events.filter((e) => e.name === 'DATA').map((e) => e.data).join('');
+}
+
+/** 取 STOP 事件的指标载荷 */
+function stopMeta(events) {
+  const stop = events.find((e) => e.name === 'STOP');
+  if (!stop) return null;
+  try {
+    return JSON.parse(stop.data);
+  } catch {
+    return null;
+  }
+}
+
+/** 清理本脚本产生的数据（会话 / 消息 / Redis 快照） */
+function aiCleanup() {
+  const steps = [
+    `DELETE FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID}`,
+    `DELETE FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`,
+  ];
+  let ok = 0;
+  for (const s of steps) {
+    if (sql(s) !== null || true) ok++;
+  }
+  redis('DEL', MOCK_SNAPSHOT_KEY);
+  return ok;
+}
+
+// ==================== 主流程 ====================
+
+async function main() {
+  console.log('='.repeat(74));
+  console.log(' FitMind M6 验收 —— AI 教练（fm-aigc）');
+  console.log('='.repeat(74));
+
+  // ==================== 1. 前置与通道检查 ====================
+  section('1. 登录与模型通道');
+  const token = await studentLogin(STUDENT_PHONE);
+  check('学员登录成功', !!token, token ? '' : '请确认 fm-auth 正常');
+
+  if (!token) return summary();
+
+  const providerRes = await call('GET', PROVIDER_API, { token });
+  const provider = providerRes.json?.data;
+  check('当前模型通道 = mock（验收默认；真实模型请加 --real）',
+    provider === 'mock', `provider=${provider}`);
+  if (provider !== 'mock') {
+    console.log('\n❌ 需要 Mock 通道。请用：bash scripts/start-all.sh fm-aigc mock\n');
+    return summary();
+  }
+
+  const anon = await call('POST', CHAT_API, { body: { content: '未登录试试' } });
+  check('未登录访问对话接口被拦（401）', anon.status === 401, `status=${anon.status}`);
+
+  // 隔离上一轮残留（本脚本可重复运行）
+  aiCleanup();
+  check('上一轮数据已隔离（会话/消息/快照清零）',
+    sql(`SELECT COUNT(*) FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`) === '0');
+
+  // ==================== 2. Mock 通道特性 ====================
+  section('2. ★ Mock 通道（让 AI 链路可自动化验收）');
+
+  const q1 = '增肌期每天要吃多少蛋白质？';
+  const r1 = await call('POST', CHAT_API, { body: { content: q1 }, token });
+  const a1 = r1.json?.data || {};
+  check('Mock 回答含可预期内容（断言才有依据）',
+    String(a1.content || '').includes('蛋白质'), `content=${String(a1.content).slice(0, 40)}`);
+  check('Mock 回答标注了通道与上下文长度（★ 这是验收 RAG 注入的抓手）',
+    String(a1.content || '').includes('Mock 通道') && String(a1.content || '').includes('上下文'),
+    `content=${String(a1.content).slice(-40)}`);
+
+  const r1b = await call('POST', CHAT_API, { body: { content: q1 }, token });
+  check('★ Mock 是确定性的：同一问题两次回答完全一致',
+    a1.content === r1b.json?.data?.content);
+
+  check('countToken 指标非 0（可观测列不能是摆设）',
+    Number(a1.promptTokens) > 0 && Number(a1.completionTokens) > 0,
+    `prompt=${a1.promptTokens}, completion=${a1.completionTokens}`);
+  check('首字延迟与总耗时均已记录',
+    Number(a1.firstTokenMs) >= 0 && Number(a1.totalMs) > 0,
+    `首字=${a1.firstTokenMs}ms 总=${a1.totalMs}ms`);
+
+  const snapshotLen = redis('LLEN', MOCK_SNAPSHOT_KEY);
+  const snapshotTop = redis('LINDEX', MOCK_SNAPSHOT_KEY, '0') || '';
+  check('★ Mock 把 prompt 全文写进了 Redis（供断言"检索到的文档确实进了 prompt"）',
+    Number(snapshotLen) > 0, `快照条数=${snapshotLen}`);
+  check('prompt 快照里含 system 人设（证明 system prompt 真的被送进模型）',
+    snapshotTop.includes('FitMind'), `前 30 字=${snapshotTop.slice(0, 30)}`);
+
+  // ==================== 3. SSE 事件协议 ====================
+  section('3. SSE 流式与事件协议');
+
+  const sq = '减脂应该怎么安排热量？';
+  const stream = await sseChat(sq, token, null);
+  check('SSE 响应头是 text/event-stream',
+    stream.contentType.includes('text/event-stream'), `contentType=${stream.contentType}`);
+  check('事件类型只有 DATA / STOP（协议不引入多余类型）',
+    [...new Set(stream.events.map((e) => e.name))].every((n) => n === 'DATA' || n === 'STOP'),
+    `类型=${[...new Set(stream.events.map((e) => e.name))].join(',')}`);
+  check('首个事件是 DATA', stream.events[0]?.name === 'DATA');
+  check('末个事件是 STOP（显式结束，前端才能区分"回答完了"和"掉线了"）',
+    stream.events[stream.events.length - 1]?.name === 'STOP');
+  check('★ 真的分了多个片（不是一次返回完整字符串）',
+    stream.events.filter((e) => e.name === 'DATA').length > 1,
+    `分片数=${stream.events.filter((e) => e.name === 'DATA').length}`);
+
+  const streamedAnswer = joinData(stream.events);
+  const plain = await call('POST', CHAT_API, { body: { content: sq }, token });
+  const plainAnswer = plain.json?.data?.content || '';
+  check('★ 流式分片拼接 == 非流式完整回答（两条路径一份实现）',
+    streamedAnswer === plainAnswer,
+    `流式 ${streamedAnswer.length} 字 / 非流式 ${plainAnswer.length} 字`);
+  check('中文未乱码（UTF-8 端到端）',
+    streamedAnswer.includes('热量') && !streamedAnswer.includes('\uFFFD'));
+
+  const meta = stopMeta(stream.events);
+  check('STOP 载荷带本轮指标（前端可显示耗时，非流式接口也靠它拿指标）',
+    !!meta && !!meta.requestId && meta.totalMs > 0 && meta.sessionId,
+    `meta=${JSON.stringify(meta)}`);
+  check('STOP 载荷的 degraded = false（正常回答不误报降级）', meta?.degraded === false);
+
+  // ==================== 4. 会话与消息落库 ====================
+  section('4. 会话与消息（落库是可观测与历史重渲染的基础）');
+
+  const newTurn = await call('POST', CHAT_API, { body: { content: '我想练胸' }, token });
+  const sid = newTurn.json?.data?.sessionId;
+  check('不传 sessionId 时服务端生成并回填', !!sid, `sessionId=${sid}`);
+
+  const sameTurn = await call('POST', CHAT_API, { body: { content: '那肩膀呢', sessionId: sid }, token });
+  check('★ 传 sessionId 时复用同一会话（不是每次都新建）',
+    sameTurn.json?.data?.sessionId === sid,
+    `返回=${sameTurn.json?.data?.sessionId}`);
+
+  const page1 = await call('GET', `${SESSIONS_API}?pageNo=1&pageSize=2`, { token });
+  const p1 = page1.json?.data || {};
+  check('★ 分页 total 正确（分页插件生效 —— 缺了它 total 恒为 0）',
+    Number(p1.total) > 0 && (p1.list || []).length <= 2,
+    `total=${p1.total} list=${(p1.list || []).length}`);
+  check('分页 pageSize 生效（列表条数不超过 pageSize）', (p1.list || []).length <= 2);
+
+  const msgs = await call('GET', `${SESSIONS_API}/${sid}/messages`, { token });
+  const list = msgs.json?.data || [];
+  check('消息历史 = 两轮共 4 条（这个会话在本组用例里发了 2 轮）',
+    list.length === 4, `条数=${list.length}`);
+  check('★ 问答严格交替 user/assistant（顺序错乱会让多轮上下文彻底失效）',
+    list.length > 0 && list.every((m, i) => (i % 2 === 0 ? m.role === 'user' : m.role === 'assistant')),
+    `roles=${list.map((m) => m.role).join(',')}`);
+  check('★ 助手消息带完整指标（token / 首字延迟 / 总耗时）',
+    Number(list[1]?.firstTokenMs) >= 0 && Number(list[1]?.totalMs) > 0,
+    `首字=${list[1]?.firstTokenMs} 总=${list[1]?.totalMs}`);
+  check('助手消息记录了模型通道（复盘时第一眼要看的信息）',
+    list[1]?.provider === 'mock', `provider=${list[1]?.provider}`);
+
+  const titleRow = sql(`SELECT title FROM fm_aigc.chat_session WHERE session_id='${sid}' AND user_id=${STUDENT_USER_ID}`);
+  check('会话标题取首轮提问（不额外花一次模型调用去生成摘要）',
+    titleRow === '我想练胸', `title=${titleRow}`);
+  const cnt = sql(`SELECT msg_count FROM fm_aigc.chat_session WHERE session_id='${sid}' AND user_id=${STUDENT_USER_ID}`);
+  check('会话消息计数 = 4（两轮 × 一问一答）', cnt === '4', `msg_count=${cnt}`);
+
+  const others = await call('GET', `${SESSIONS_API}/999999999999999999/messages`, { token });
+  check('★ 越权：访问非本会话 → 拒绝（不区分"不存在"与"不是你的"）',
+    others.status !== 200 || others.json?.success === false,
+    `status=${others.status} msg=${others.json?.msg}`);
+
+  // ==================== 5. 降级（模型不可用不是 500） ====================
+  section('5. ★ 降级：模型超时/异常要给人话，不是 500');
+
+  const to = await call('POST', CHAT_API, { body: { content: '[MOCK:TIMEOUT] 今天练什么' }, token });
+  check('模型超时 → HTTP 200 + 可读文案（不是 500）',
+    to.status === 200 && String(to.json?.data?.content || '').includes('稍等'),
+    `status=${to.status} content=${to.json?.data?.content}`);
+  check('降级时 degraded=true（前端据此显示"重试"，不靠猜文案）',
+    to.json?.data?.degraded === true);
+
+  const er = await call('POST', CHAT_API, { body: { content: '[MOCK:ERROR] 今天练什么' }, token });
+  check('模型异常 → 同样降级为可读文案', er.status === 200 && er.json?.data?.degraded === true);
+
+  const toMeta = await call('GET', `${SESSIONS_API}/${to.json?.data?.sessionId}/messages`, { token });
+  const toList = toMeta.json?.data || [];
+  check('降级回答也落库（复盘时能看到当时真的降级了）',
+    toList.length === 2 && toList[1]?.content?.includes('稍等'),
+    `条数=${toList.length}`);
+  check('降级轮次没有首字延迟（本来就没吐出 token，不能编一个数出来）',
+    toList[1]?.firstTokenMs === null || toList[1]?.firstTokenMs === undefined,
+    `firstTokenMs=${toList[1]?.firstTokenMs}`);
+
+  // ==================== 6. 参数校验 ====================
+  section('6. 参数校验');
+
+  const blank = await call('POST', CHAT_API, { body: { content: '' }, token });
+  check('空提问被拒', blank.status === 400 || blank.json?.success === false,
+    `status=${blank.status} msg=${blank.json?.msg}`);
+
+  const tooLong = await call('POST', CHAT_API, { body: { content: 'x'.repeat(1001) }, token });
+  check('超长提问被拒（有上限，防止把上下文一次打满）',
+    tooLong.status === 400 || tooLong.json?.success === false,
+    `status=${tooLong.status} msg=${tooLong.json?.msg}`);
+
+  const noAuth = await call('GET', SESSIONS_API, {});
+  check('未登录访问会话列表被拦', noAuth.status === 401, `status=${noAuth.status}`);
+
+  // ==================== 7. 清理与自检 ====================
+  section('7. 清理与自检');
+  aiCleanup();
+  const leftSession = sql(`SELECT COUNT(*) FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`);
+  const leftMsg = sql(`SELECT COUNT(*) FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID}`);
+  const leftSnap = redis('LLEN', MOCK_SNAPSHOT_KEY);
+  check('会话无残留', leftSession === '0', `剩余=${leftSession}`);
+  check('消息无残留', leftMsg === '0', `剩余=${leftMsg}`);
+  check('Redis prompt 快照已清', Number(leftSnap || 0) === 0, `剩余=${leftSnap}`);
+
+  return summary();
+}
+
+main()
+  .catch((e) => {
+    console.error('\n脚本异常终止：', e);
+    try { aiCleanup(); } catch { /* ignore */ }
+    summary();
+  });

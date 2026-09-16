@@ -58,6 +58,7 @@
         <!-- 公共依赖（原由 fitmind 管理，这里自管） -->
         <hutool.version>5.8.36</hutool.version>
         <swagger.version>2.2.19</swagger.version>
+        <mybatis-plus.version>3.5.9</mybatis-plus.version>
     </properties>
 
     <dependencyManagement>
@@ -80,6 +81,14 @@
                 <groupId>org.springframework.ai</groupId>
                 <artifactId>spring-ai-bom</artifactId>
                 <version>${aigc.spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- MyBatis-Plus：会话与消息落库（M6-1 起） -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-bom</artifactId>
+                <version>${mybatis-plus.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -157,7 +166,50 @@
             <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
 
-        <!-- 本模块无定时任务 → 不引 xxl-job-core；暂不需要 DB（M6-1 建会话表时再加） -->
+        <!-- ==================== M6-1 起需要的能力 ==================== -->
+
+        <!-- 会话与消息落库 -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+        <!-- MyBatis-Plus 3.5.9 起 jsqlparser 被拆出来，分页/解析相关要用得单独引 -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-jsqlparser</artifactId>
+        </dependency>
+        <!--
+          ⚠️ 驱动坐标和别的服务不一样：其余 14 个服务用的是老的
+          `mysql:mysql-connector-java`（由 fitmind 父 pom 管版本），
+          而 Spring Boot 3.4+ 的 BOM 管理的已经是新坐标 `com.mysql:mysql-connector-j`。
+          本模块换 parent 后要走新的那一套 —— 用旧坐标会报
+          `'dependencies.dependency.version' ... is missing`，
+          因为新 BOM 里根本没有它的版本号。
+        -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+        </dependency>
+
+        <!--
+          Redis 在本模块有三个用途（不是"顺便引一下"）：
+          ① 会话热消息（M6-5：Redis List 存最近 N 轮，MySQL 只存元数据与全量历史）
+          ② 分布式打断标记（M6-5：ai:generating:{sessionId}:{requestId}，带 TTL）
+          ③ ★ Mock 通道记录 prompt 快照（M6-1 就要）—— 让验收脚本能断言
+             "RAG 检索到的文档确实进了 prompt"，而不是只看模型输出
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- JSON 列（chat_message.tool_calls / params）用 JacksonTypeHandler 映射 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <!-- 本模块无定时任务 → 不引 xxl-job-core（知识库重建走管理端接口手动触发） -->
     </dependencies>
 
     <build>

@@ -2,6 +2,11 @@ server:
   port: 8094
   tomcat:
     uri-encoding: UTF-8
+    # AI 对话是长连接（SSE），每个连接占一个线程直到回答结束。
+    # 默认 200 个线程在演示场景够用，但要知道这个数就是"同时能有多少人问问题"的上限；
+    # 真上量时的解法是换成 WebFlux（本模块已经是 Reactor 流，改造代价不大）。
+    threads:
+      max: 200
 
 spring:
   application:
@@ -9,37 +14,60 @@ spring:
   profiles:
     active: local
 
-  # ==================== Spring AI：chat（DeepSeek，OpenAI 兼容协议） ====================
-  # ★ base-url 换成任何 OpenAI 兼容的服务即可（百炼 / 硅基流动 / 自建网关），
-  #   所以"换供应商"在这里只是一个配置项。embedding 用百炼，见 M6-1 的双 provider 装配。
+  # ==================== Spring AI ====================
+  # ★ chat 与 embedding 都走 OpenAI 兼容协议（方案 §十五 D2/D4）：
+  #    chat 用 DeepSeek，embedding 用阿里百炼 —— 两家都是 OpenAI 规范，
+  #    所以共用同一套 starter，"换供应商"在这里只是一个配置项。
   ai:
     openai:
       base-url: ${AIGC_CHAT_BASE_URL:https://api.deepseek.com}
-      api-key: ${DEEPSEEK_API_KEY:}
+      # ⚠️ 默认值必须是**非空**的 not-configured，不能留空：
+      #    OpenAiApi 在构造时断言 apiKey 非空，空串会让**服务启动失败**。
+      #    一个"没配 key"的配置问题不该升级成"服务起不来" —— 它应该表现为
+      #    "调用时 401 → 走降级文案"，而且会在启动日志里明确告诉我们走的是哪个通道。
+      api-key: ${DEEPSEEK_API_KEY:not-configured}
       chat:
-        enabled: true
+        # ⚠️ 与 fm.ai.chat.provider 必须一致（provider=mock 时要关掉它，
+        #    否则会同时存在两个 ChatModel Bean）。start-all.sh 已封装好这个联动。
+        #    万一没对齐也不会挂：Mock Bean 标了 @Primary，且 api-key 有非空兜底。
+        enabled: ${AIGC_CHAT_ENABLED:true}
         options:
           # ⚠️ 不要写 deepseek-chat —— 那是已于 2026-07-24 退休的遗留别名
-          #    （实测仍能解析到 deepseek-flash，但随时可能失效）。
+          #    （实测仍能静默解析到 deepseek-flash，但随时可能失效）。
           #    以 GET /models 返回的为准：deepseek-flash / deepseek-v4-pro
           model: ${AIGC_CHAT_MODEL:deepseek-flash}
           temperature: 0.7
-
-aigc:
-  spike:
-    # 仅用于在 /spike/ping 里回显，方便确认运行期真实生效的版本
-    spring-ai-version: ${AIGC_SPRING_AI_VERSION:1.1.8}
+      # 暂时关掉：这一套 base-url/key 是给 chat 用的，用它去做 embedding 会 404。
+      # M6-3 会为百炼建一套独立的 embedding 配置。
+      embedding:
+        enabled: false
 
 fm:
   auth:
     resource:
       enable: true
       includeLoginPaths:
-        # ★ spike 探针要求登录：这样通过网关访问时会带上用户上下文，
-        #   里面的 Feign 调用才会把用户透传给 fm-course（否则下游 401）
-        - /spike/**
+        # ★ 对话必须登录：用户上下文是工具鉴权的根（M6-4 的 BodyTools 要读
+        #    "当前用户"的体测档案，userId 只从 UserContext 取，绝不由 LLM 提供）
+        - /chat/**
       excludeLoginPaths:
         - /health
+
+  # ==================== AI 行为配置 ====================
+  ai:
+    chat:
+      # deepseek | mock。mock 是内置确定性模型，供自动化验收与离线演示
+      # （与 M4-2 的 Mock 支付渠道、M4-4 的 Mock 退款同一个思想）
+      provider: ${AIGC_CHAT_PROVIDER:deepseek}
+      # 单轮模型调用超时。超时后返回可读的降级文案，不是 500
+      timeout-ms: ${AIGC_CHAT_TIMEOUT_MS:60000}
+    mock:
+      # 每个分片的字符数 —— Mock 要"真的分片"，否则 SSE 拼接/打字机/
+      # 打断时"已生成部分落库"这些代码在验收里等于没跑
+      chunk-size: 4
+      chunk-delay-ms: 30
+      # 把 prompt 全文存进 Redis，供验收脚本断言"检索到的文档确实进了 prompt"
+      snapshot-prompt: true
 
 ---
 spring:
@@ -54,8 +82,34 @@ spring:
       discovery:
         group: DEFAULT_GROUP
         namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_aigc?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      # ⚠️ 端口是 16379 不是 6379（Windows 保留端口段盖住了 6379，见排障手册）
+      port: ${REDIS_PORT:16379}
+      # ⚠️ 默认值必须与别的服务一致。写成 `${REDIS_PASSWORD:}` 这种空默认值
+      #    会让连接报 NOAUTH，而且症状很隐蔽（M5 建 fm-data 时踩过：
+      #    写入"成功了一半"，计数全是 0）
+      password: ${REDIS_PASSWORD:123456}
+      database: 0
+
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
 
 logging:
   level:
     com.fitmind: debug
+    # Spring AI 的请求日志会把整个 prompt 打出来，调试 RAG 时很有用，
+    # 但它的量很大（每轮都一条完整 prompt），所以默认不开
     org.springframework.ai: info
