@@ -38,6 +38,10 @@ export MINIO_SECRET_KEY="$(env_get MINIO_ROOT_PASSWORD)"
 export RABBITMQ_USER="$(env_get RABBITMQ_USER)"
 export RABBITMQ_PASSWORD="$(env_get RABBITMQ_PASSWORD)"
 export XXL_JOB_ADMIN="http://127.0.0.1:9090/xxl-job-admin"
+# ★ 大模型密钥（M6 fm-aigc）：放在 docker/.env 里（已被 gitignore），
+#   这里逐行取值注入 —— 绝不写进 application.yml
+export DEEPSEEK_API_KEY="$(env_get DEEPSEEK_API_KEY)"
+export DASHSCOPE_API_KEY="$(env_get DASHSCOPE_API_KEY)"
 XXL_TOKEN="$(env_get XXL_JOB_TOKEN)"
 export XXL_JOB_TOKEN="${XXL_TOKEN:-default_token}"
 
@@ -58,6 +62,8 @@ resolve() {
         fm-promotion) echo "8090 fm-promotion/target/fm-promotion-1.0.0.jar" ;;
         fm-message)  echo "8091 fm-message/target/fm-message-1.0.0.jar" ;;
         fm-exam)     echo "8092 fm-exam/target/fm-exam-1.0.0.jar" ;;
+        # ⚠️ fm-aigc 是唯一用独立 parent（Boot 3.5.16）的模块，见其 pom 注释
+        fm-aigc)     echo "8094 fm-aigc/target/fm-aigc-1.0.0.jar" ;;
         fm-data)     echo "8093 fm-data/target/fm-data-1.0.0.jar" ;;
         fm-gateway)  echo "10010 fm-gateway/target/fm-gateway-1.0.0.jar" ;;
         *) return 1 ;;
@@ -121,6 +127,7 @@ start fm-promotion    8090 fm-promotion/target/fm-promotion-1.0.0.jar
 start fm-message      8091 fm-message/target/fm-message-1.0.0.jar
 start fm-exam         8092 fm-exam/target/fm-exam-1.0.0.jar
 start fm-data         8093 fm-data/target/fm-data-1.0.0.jar
+start fm-aigc         8094 fm-aigc/target/fm-aigc-1.0.0.jar
 start fm-gateway      10010 fm-gateway/target/fm-gateway-1.0.0.jar
 
 echo ""
@@ -128,7 +135,7 @@ echo "===== 等待端口就绪（最多 150 秒） ====="
 for i in $(seq 1 50); do
     sleep 3
     up=0
-    for port in 8081 8082 8083 8084 8085 8086 8087 8088 8089 8090 8091 8092 8093 10010; do
+    for port in 8081 8082 8083 8084 8085 8086 8087 8088 8089 8090 8091 8092 8093 8094 10010; do
         port_open "$port" && up=$((up + 1))
     done
     [ "$up" -eq 11 ] && { echo "✅ 端口全部就绪"; break; }

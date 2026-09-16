@@ -39,6 +39,7 @@
         <module>fm-message</module>
         <module>fm-exam</module>
         <module>fm-data</module>
+        <module>fm-aigc</module>
         <module>fm-gateway</module>
         <module>fm-user</module>
     </modules>

@@ -1,0 +1,61 @@
+server:
+  port: 8094
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-aigc
+  profiles:
+    active: local
+
+  # ==================== Spring AI：chat（DeepSeek，OpenAI 兼容协议） ====================
+  # ★ base-url 换成任何 OpenAI 兼容的服务即可（百炼 / 硅基流动 / 自建网关），
+  #   所以"换供应商"在这里只是一个配置项。embedding 用百炼，见 M6-1 的双 provider 装配。
+  ai:
+    openai:
+      base-url: ${AIGC_CHAT_BASE_URL:https://api.deepseek.com}
+      api-key: ${DEEPSEEK_API_KEY:}
+      chat:
+        enabled: true
+        options:
+          # ⚠️ 不要写 deepseek-chat —— 那是已于 2026-07-24 退休的遗留别名
+          #    （实测仍能解析到 deepseek-flash，但随时可能失效）。
+          #    以 GET /models 返回的为准：deepseek-flash / deepseek-v4-pro
+          model: ${AIGC_CHAT_MODEL:deepseek-flash}
+          temperature: 0.7
+
+aigc:
+  spike:
+    # 仅用于在 /spike/ping 里回显，方便确认运行期真实生效的版本
+    spring-ai-version: ${AIGC_SPRING_AI_VERSION:1.1.8}
+
+fm:
+  auth:
+    resource:
+      enable: true
+      includeLoginPaths:
+        # ★ spike 探针要求登录：这样通过网关访问时会带上用户上下文，
+        #   里面的 Feign 调用才会把用户透传给 fm-course（否则下游 401）
+        - /spike/**
+      excludeLoginPaths:
+        - /health
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+
+logging:
+  level:
+    com.fitmind: debug
+    org.springframework.ai: info
