@@ -3,6 +3,9 @@ package com.fitmind.aigc.agent;
 import com.fitmind.aigc.rag.RagTrace;
 import com.fitmind.aigc.tool.ToolTrace;
 import com.fitmind.api.dto.user.UserBodyProfileDTO;
+import org.springframework.ai.chat.messages.Message;
+
+import java.util.List;
 
 /**
  * 一次提问的上下文 —— Agent 回答问题所需要的全部输入。
@@ -30,15 +33,23 @@ import com.fitmind.api.dto.user.UserBodyProfileDTO;
  *                  <b>编排层拉一次、两个消费方共用</b>（RAG 过滤 + BodyTools）——
  *                  各自去 Feign 的话会出现"过滤器用旧档案、模型看新档案"这种
  *                  极难发现的不一致
+ * @param history   ★ 本轮要带给模型的历史消息（M6-5）：<b>[摘要?] + [最近 N 轮原文]</b>。
+ *                  由记忆层组装成 Spring AI 的 {@code Message} 列表，
+ *                  而不是"拼成一段文本塞进用户消息"——
+ *                  后者会让模型分不清哪句是用户说的、哪句是它说的。</p>
+ *                  <p>⚠️ 它<b>不包含当前提问</b>：当前提问由 Agent 自己作为
+ *                  {@code user()} 加上去。记忆层必须在"把当前提问写进记忆之前"
+ *                  把历史取好，否则当前提问会重复出现两次（模型以为自己被问了两次）。</p>
  */
 public record AgentContext(String sessionId, String requestId, Long userId, String question,
                           RetrievalOptions retrieval, RagTrace ragTrace,
-                          ToolTrace toolTrace, UserBodyProfileDTO bodyProfile, String authToken) {
+                          ToolTrace toolTrace, UserBodyProfileDTO bodyProfile, String authToken,
+                          List<Message> history) {
 
     /** 不带任何覆盖参数时的便捷构造 */
     public AgentContext(String sessionId, String requestId, Long userId, String question) {
         this(sessionId, requestId, userId, question, RetrievalOptions.none(), new RagTrace(),
-                new ToolTrace(4), null, null);
+                new ToolTrace(4), null, null, List.of());
     }
 
     /**

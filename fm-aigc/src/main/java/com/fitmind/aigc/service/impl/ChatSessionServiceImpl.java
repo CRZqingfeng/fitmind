@@ -110,6 +110,11 @@ public class ChatSessionServiceImpl extends ServiceImpl<ChatSessionMapper, ChatS
 
     @Override
     public void touch(String sessionId, Long userId, int delta) {
+        touch(sessionId, userId, delta, null);
+    }
+
+    @Override
+    public void touch(String sessionId, Long userId, int delta, String lastMessage) {
         baseMapper.update(null, new LambdaUpdateWrapper<ChatSession>()
                 .eq(ChatSession::getUserId, userId)
                 .eq(ChatSession::getSessionId, sessionId)
@@ -117,7 +122,19 @@ public class ChatSessionServiceImpl extends ServiceImpl<ChatSessionMapper, ChatS
                 //   （两个请求都读到 5，各自写 6，结果少算一条）。
                 //   delta 是代码里的固定值（1 或 2），不是用户输入，没有注入风险。
                 .setSql("msg_count = msg_count + " + delta)
-                .set(ChatSession::getLastActive, LocalDateTime.now()));
+                .set(ChatSession::getLastActive, LocalDateTime.now())
+                // ★ 条件 set：MyBatis-Plus 的 set(false, ...) 不生成该列，
+                //   于是"不传预览"与"把预览写成空"不会混淆
+                .set(StrUtil.isNotBlank(lastMessage), ChatSession::getLastMessage, preview(lastMessage)));
+    }
+
+    @Override
+    public void assertMine(String sessionId) {
+        Long userId = UserContext.getUser();
+        if (StrUtil.isBlank(sessionId) || findByUserAndSession(sessionId, userId) == null) {
+            // ★ 查不到就说"不存在"，不区分"不是你自己的" —— 见 AigcErrorInfo 里的说明
+            throw new BizIllegalException(AigcErrorInfo.Msg.SESSION_NOT_MINE);
+        }
     }
 
     // ==================== 内部 ====================
@@ -140,8 +157,25 @@ public class ChatSessionServiceImpl extends ServiceImpl<ChatSessionMapper, ChatS
                 .setSessionId(s.getSessionId())
                 .setTitle(s.getTitle())
                 .setMsgCount(s.getMsgCount())
+                .setLastMessage(s.getLastMessage())
                 .setLastActive(s.getLastActive())
                 .setCreateTime(s.getCreateTime());
+    }
+
+    /**
+     * 会话列表的"最后一句"预览。
+     *
+     * <p>★ 做"空白压缩 + 截断"而不是原样存：会话列表是一行文字，
+     * 而 AI 的回答里换行非常常见 —— 原样存进列表会把行高撑变形，
+     * 这种问题在前端看起来"是前端的事"，其实是数据没收拾。</p>
+     */
+    private String preview(String content) {
+        if (StrUtil.isBlank(content)) {
+            return null;
+        }
+        String t = content.trim().replaceAll("\\s+", " ");
+        return t.length() <= AigcConstants.SESSION_PREVIEW_MAX_LEN
+                ? t : t.substring(0, AigcConstants.SESSION_PREVIEW_MAX_LEN);
     }
 
     private ChatMessageVO toMessageVO(ChatMessage m) {

@@ -11,6 +11,9 @@ import com.fitmind.aigc.domain.po.ChatMessage;
 import com.fitmind.aigc.domain.po.ChatSession;
 import com.fitmind.aigc.domain.vo.ChatEventVO;
 import com.fitmind.aigc.domain.vo.ChatResultVO;
+import com.fitmind.aigc.interrupt.GenerationRegistry;
+import com.fitmind.aigc.memory.CompressOutcome;
+import com.fitmind.aigc.memory.ConversationMemory;
 import com.fitmind.aigc.orchestration.ChatOrchestrator;
 import com.fitmind.aigc.orchestration.ChatType;
 import com.fitmind.aigc.orchestration.OrchestrationResult;
@@ -24,6 +27,7 @@ import com.fitmind.common.utils.TokenContext;
 import com.fitmind.common.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.stereotype.Service;
@@ -55,6 +59,10 @@ public class ChatServiceImpl implements IChatService {
     private final AigcProperties props;
     /** ★ 体测档案：编排层拉一次，RAG 元数据过滤与 BodyTools 共用同一份 */
     private final BodyProfileService bodyProfileService;
+    /** ★ 会话记忆（M6-5）：上下文窗口的读写与压缩，对话主干只跟它打交道 */
+    private final ConversationMemory memory;
+    /** ★ 生成登记簿（M6-5）：分布式打断的标记，见 GenerationRegistry */
+    private final GenerationRegistry generationRegistry;
 
     // ==================== 流式 ====================
 
@@ -79,6 +87,17 @@ public class ChatServiceImpl implements IChatService {
                 //   与 Mock 通道模拟的"模型侧超时"是同一个类型，所以两条路共用一个降级分支。
                 .timeout(Duration.ofMillis(props.getChat().getTimeoutMs()))
                 .map(resp -> onChunk(turn, resp))
+                // ★★ M6-5 分布式打断：每个分片之前检查一次"这一轮还算数吗"。
+                //
+                //   takeWhile 的语义正好合用：谓词返回 false 时**取消上游并正常结束**，
+                //   于是后面 concatWith 里的 commit 与 STOP 照常执行 ——
+                //   用户看到的是"打字机停住 + 本轮正常收尾"，而不是一个断掉的连接。
+                //
+                //   ⚠️ 为什么"被停止"要在这里检测，而不是靠客户端断连：
+                //   客户端断连只能停下**本实例**的这条流。而真实的多实例部署下，
+                //   "点停止"的请求会被负载均衡打到**另一个实例** ——
+                //   那条路径必须通过共享的 Redis 标记传过来，这也是它存在的全部理由。
+                .takeWhile(ev -> !interrupted(turn))
                 // 空分片不发：有些渠道会先发一个空的首包（只带 usage），
                 // 前端收到空的 DATA 会渲染出一个看不见的空行
                 .filter(ev -> StrUtil.isNotEmpty(ev.getData()))
@@ -119,6 +138,17 @@ public class ChatServiceImpl implements IChatService {
                                 turn.requestId, turn.answer.length());
                         commit(turn, turn.degraded);
                     }
+                    // ★★ M6-5 打断标记的清理 —— **挂在 doFinally 上，覆盖全部四种信号**
+                    //   （正常完成 / 出错 / 取消 / 被停止）。
+                    //
+                    //   常见实现只在"正常结束"这一条路径上清（而且用的是单机 Map），
+                    //   于是任何异常路径都会把标记留下来 → 会话永久卡死。
+                    //   这里再加一道 TTL 兜底：就算这个 finally 因为进程被杀而没跑，
+                    //   标记也会在 120 秒后自动消失 —— **"状态"变成了"租约"**。
+                    //
+                    //   ⚠️ 清理是"值相等才删"（Lua）：避免把同会话下一轮已经打上的
+                    //   新标记误删（那会让新一轮的流莫名其妙自己停掉）。
+                    generationRegistry.clear(turn.sessionId, turn.requestId);
                 });
     }
 
@@ -191,9 +221,32 @@ public class ChatServiceImpl implements IChatService {
                     .setToolCallCount(meta.getInt("toolCallCount"))
                     .setToolNames(meta.getJSONArray("toolNames") == null ? null
                             : meta.getJSONArray("toolNames").toList(String.class))
-                    .setToolCalls(meta.getJSONObject("toolCalls"));
+                    .setToolCalls(meta.getJSONObject("toolCalls"))
+                    // ★ M6-5：记忆与打断指标。它们必须出现在**非流式**返回里 ——
+                    //   验收脚本与调用方读的就是这里，不用去翻日志或查 Redis
+                    .setStopped(meta.getBool("stopped", false))
+                    .setMemoryHistory(meta.getInt("memoryHistory"))
+                    .setCompressed(meta.getBool("compressed", false))
+                    .setCompressedCount(meta.getInt("compressedCount"))
+                    .setCompressMs(meta.getInt("compressMs"));
         }
         return vo;
+    }
+
+    // ==================== 停止与上下文查看（M6-5） ====================
+
+    @Override
+    public String stop(String sessionId) {
+        // ⚠️ 归属校验必须在"删除标记"之前：否则任何人拿到别人的 sessionId
+        //   就能把对方正在生成的回答掐掉（一个不需要登录态之外任何权限的破坏动作）
+        sessionService.assertMine(sessionId);
+        return generationRegistry.stop(sessionId);
+    }
+
+    @Override
+    public Map<String, Object> memoryView(String sessionId) {
+        sessionService.assertMine(sessionId);
+        return memory.view(sessionId);
     }
 
     // ==================== 内部步骤 ====================
@@ -213,6 +266,12 @@ public class ChatServiceImpl implements IChatService {
         turn.retrieval = new AgentContext.RetrievalOptions(
                 dto.getGoal(), dto.getRagTopK(), dto.getRagThreshold(), dto.getRagHybrid());
 
+        // ★ M6-5：在**请求线程上、调模型之前**就把"正在生成"的标记打好。
+        //   这样即使 stop 请求比流被订阅还早到（用户几乎在同一瞬间点了停止），
+        //   stop 也能先把它删掉 —— 流启动后的第一次检查就会发现并立即结束，
+        //   而不是"白调一次真实模型再终止"（那一次调用是要花钱和耗时的）。
+        generationRegistry.mark(session.getSessionId(), turn.requestId);
+
         // 提问与回答共用同一个 requestId —— 这是幂等兜底键的一半
         // （uk_request_role(request_id, role)），也是"停止当前这一轮"的定位依据
         sessionService.saveMessage(new ChatMessage()
@@ -221,7 +280,7 @@ public class ChatServiceImpl implements IChatService {
                 .setRequestId(turn.requestId)
                 .setRole(AigcConstants.ROLE_USER)
                 .setContent(dto.getContent()));
-        sessionService.touch(session.getSessionId(), userId, 1);
+        sessionService.touch(session.getSessionId(), userId, 1, dto.getContent());
         return turn;
     }
 
@@ -235,6 +294,18 @@ public class ChatServiceImpl implements IChatService {
      * 交给降级链路去统一处理（用户看到的还是那句可读的降级文案，不是 500）。</p>
      */
     private OrchestrationResult orchestrate(ChatType chatType, ChatTurn turn) {
+        // ★★ M6-5 会话记忆的三个动作，**顺序不能换**：
+        //   ① 先压缩：把窗口外的旧内容折成摘要（它要用到"压缩前的"消息列表）
+        //   ② 再取历史：摘要 + 最近 N 轮原文（此时列表里**还没有**当前提问）
+        //   ③ 最后才把当前提问写进记忆
+        //   —— ③ 如果提到 ② 前面，当前提问会既出现在历史里、又作为本轮提问出现一次，
+        //      模型会以为自己被问了两次，然后可能回答两遍或答非所问。
+        //      这类 bug 在 prompt 里"看起来很正常"，所以顺序必须写清楚。
+        turn.compress = memory.compressIfNeeded(turn.sessionId);
+        List<Message> history = memory.promptHistory(turn.sessionId);
+        turn.historySize = history.size();
+        memory.record(turn.sessionId, AigcConstants.ROLE_USER, turn.question);
+
         // ★★ M6-4：先拉一次体测档案，两个消费方共用
         //   ① RAG 的元数据过滤要用"训练目标"（减脂用户不该拿到增肌文档）；
         //   ② 模型要用档案说人话（"你体脂 15.5%、每周练 4 次"）。
@@ -257,7 +328,19 @@ public class ChatServiceImpl implements IChatService {
         //   那里 ThreadLocal 里的身份是空的（见 ToolAuthContext 的说明）
         AgentContext context = new AgentContext(
                 turn.sessionId, turn.requestId, turn.userId, turn.question,
-                retrieval, turn.ragTrace, turn.toolTrace, profile, TokenContext.getToken());
+                retrieval, turn.ragTrace, turn.toolTrace, profile, TokenContext.getToken(), history);
+
+        // ★ 调用模型**之前**先检查一次是否已被停止。
+        //   用户已经明确表示不要这个回答了，那就连这次模型调用都不该发生 ——
+        //   否则"点了停止还扣了一次 token"（而且它还会出现在成本统计里）。
+        //   ⚠️ 这个检查只在"停止几乎与提问同时到达"时命中，正常路径不受影响。
+        if (!generationRegistry.alive(turn.sessionId, turn.requestId)) {
+            turn.stopped = true;
+            log.info("★ 本轮在调用模型之前就已被停止，直接结束（省下一次模型调用）：requestId={}",
+                    turn.requestId);
+            return OrchestrationResult.of(null, Flux.<ChatResponse>empty());
+        }
+
         try {
             OrchestrationResult result = orchestrator.dispatch(chatType, context);
             turn.agentLabel = result.label();
@@ -272,6 +355,33 @@ public class ChatServiceImpl implements IChatService {
             // 显式给泛型参数：Flux.error 单独用会被推断成 Flux<Object>
             return OrchestrationResult.of(null, Flux.<ChatResponse>error(e));
         }
+    }
+
+    /**
+     * 检查本轮是否应该停止吐字（分布式打断的检查点）。
+     *
+     * <p>★ <b>带节流</b>：每个分片都查一次 Redis 的话，一段 200 字的回答
+     * （分片 4 字）就是 50 次网络往返 —— 为了一个用户可能根本不会点的停止按钮，
+     * 给每一次对话都加上 50 次往返。所以按时间节流（默认 200ms 检查一次），
+     * 代价是停止最多有 200ms 的延迟，对"点停止"这个动作完全无感。</p>
+     *
+     * <p>★ 判定条件是"标记还在、且值是我的"（见 {@link GenerationRegistry#alive}）：
+     * 标记消失 = 被停止或已过期；值变了 = 同会话已经开了新一轮，
+     * 这一轮应当让位（这正是"同会话连发时新问题接管旧回答"的实现）。</p>
+     */
+    private boolean interrupted(ChatTurn turn) {
+        long now = System.currentTimeMillis();
+        if (now - turn.lastInterruptCheckMs < props.getStop().getCheckIntervalMs()) {
+            return false;
+        }
+        turn.lastInterruptCheckMs = now;
+        if (generationRegistry.alive(turn.sessionId, turn.requestId)) {
+            return false;
+        }
+        turn.stopped = true;
+        log.info("★ 本轮生成被停止（标记已失效）：requestId={}, 已生成 {} 字",
+                turn.requestId, turn.answer.length());
+        return true;
     }
 
     /** 处理一个模型分片：记首字延迟、累计 token、包成 DATA 事件 */
@@ -304,6 +414,14 @@ public class ChatServiceImpl implements IChatService {
      */
     private void commit(ChatTurn turn, boolean degraded) {
         if (!turn.committed.compareAndSet(false, true)) {
+            return;
+        }
+        // ★ 一个字都没吐出来就被停止 → 不落库。
+        //   落一条空内容的助手消息会让会话列表里出现"空白气泡"，
+        //   而且它会被算作一次"AI 回答过"（token 全是 0），污染使用统计。
+        //   （用户提问那条照常保留 —— 他确实问过，只是没得到回答。）
+        if (turn.answer.isEmpty() && turn.stopped) {
+            log.info("本轮被停止且未产出内容，不落库：requestId={}", turn.requestId);
             return;
         }
         try {
@@ -339,15 +457,23 @@ public class ChatServiceImpl implements IChatService {
                 msg.setToolCalls(turn.toolTrace.toMap());
             }
             sessionService.saveMessage(msg);
-            sessionService.touch(turn.sessionId, turn.userId, 1);
+            sessionService.touch(turn.sessionId, turn.userId, 1, turn.answer.toString());
+            // ★ M6-5：把这一轮的回答写进上下文窗口（Redis 那份）。
+            //   落库与"进记忆"是**两件事**：① 落库（MySQL）是完整档案，一条都不会少；
+            //   ② 进记忆（Redis）是"下一轮要喂给模型的窗口"，会被压缩/截断/过期。
+            //   常见实现只有 ②，于是"给用户看的历史"和"给模型看的上下文"是同一份数据，
+            //   两个需求互相牵制：想记得久就得留得多，留得多又让存储与列表失控。
+            memory.record(turn.sessionId, AigcConstants.ROLE_ASSISTANT, turn.answer.toString());
             log.info("本轮对话完成：requestId={}, 编排={}, Agent={}, 首字 {}ms, 总耗时 {}ms, tokens={}/{}, "
-                            + "检索={}(命中 {} 条/候选 {} 条, {}ms), 工具={} 次{}, 降级={}",
+                            + "检索={}(命中 {} 条/候选 {} 条, {}ms), 工具={} 次{}, 历史 {} 条{}, 降级={}",
                     turn.requestId, turn.chatType, turn.agentLabel, turn.firstTokenMs, msg.getTotalMs(),
                     turn.promptTokens, turn.completionTokens,
                     turn.ragTrace.getMode(), turn.ragTrace.getInjectedCount(),
                     turn.ragTrace.getCandidateCount(), turn.ragTrace.getSearchMs(),
                     turn.toolTrace.getCallCount(),
                     turn.toolTrace.getCards().isEmpty() ? "" : "（返回 " + turn.toolTrace.getCards().size() + " 张卡片）",
+                    turn.historySize,
+                    turn.compress.compressed() ? "（本轮压缩 " + turn.compress.compressedCount() + " 条）" : "",
                     degraded);
         } catch (Exception e) {
             // 落库失败不能影响用户已经看到的回答 —— 回答已经吐出去了，
@@ -430,6 +556,15 @@ public class ChatServiceImpl implements IChatService {
                         // ★ 完整调用明细（名称/参数/结果摘要/耗时）：
                         //   排查"AI 为什么答非所问"时第一件要看的就是它
                         .set("toolCalls", turn.toolTrace.isEmpty() ? null : turn.toolTrace.toMap())
+                        // ★ M6-5 记忆与打断的可观测：
+                        //   · stopped        —— 本轮是不是被停止的（前端据此不再提示"回答可能不完整"）
+                        //   · memoryHistory  —— 这轮带上了几条历史（多轮到底有没有生效，一眼可见）
+                        //   · compressed     —— 这轮是否触发了上下文压缩（它会额外花一次模型调用）
+                        .set("stopped", turn.stopped)
+                        .set("memoryHistory", turn.historySize)
+                        .set("compressed", turn.compress.compressed())
+                        .set("compressedCount", turn.compress.compressedCount())
+                        .set("compressMs", (int) turn.compress.costMs())
                         .set("degraded", degraded)
                         .toString());
     }
@@ -459,6 +594,17 @@ public class ChatServiceImpl implements IChatService {
         private final ToolTrace toolTrace;
         /** ★ 本轮拉取的体测档案（编排层拉、两个消费方共用） */
         private UserBodyProfileDTO bodyProfile;
+
+        // ==================== M6-5 记忆与打断 ====================
+
+        /** 本轮是否被停止（用户点停止 / 被新一轮接管 / 标记过期） */
+        private volatile boolean stopped;
+        /** 上次检查打断标记的时间戳（节流，见 {@code interrupted}） */
+        private long lastInterruptCheckMs;
+        /** 本轮带上的历史消息条数（含摘要那条）—— 多轮是否真的生效，看它 */
+        private int historySize;
+        /** 本轮的压缩结果（绝大多数是 {@code none()}） */
+        private CompressOutcome compress = CompressOutcome.none();
         /** 本次使用的编排策略 */
         private ChatType chatType = ChatType.DEFAULT;
         /** 实际产出回答的 Agent 标签（SIMPLE 策略下是 simple） */

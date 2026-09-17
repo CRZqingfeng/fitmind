@@ -2,6 +2,7 @@ package com.fitmind.aigc.prompt;
 
 import cn.hutool.core.util.StrUtil;
 import com.fitmind.aigc.agent.AgentType;
+import com.fitmind.aigc.constants.AigcConstants;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -75,6 +76,10 @@ public class PromptManager {
             get(type);
         }
         get(SIMPLE_KEY);
+        // ★ M6-5：摘要提示词也一起预热 —— 它在"对话变长之后的某一轮"才会被用到，
+        //   不预热的话，那一轮会额外吃一次 Nacos 往返（正好加在首字延迟上，
+        //   表现为"聊到某个长度后突然变慢"，很难联想到是提示词没预热）
+        get(AigcConstants.COMPRESS_PROMPT_KEY);
 
         Map<String, String> summary = describe();
         StringBuilder sb = new StringBuilder();
@@ -122,6 +127,8 @@ public class PromptManager {
             result.put(type.key(), describeOne(type.key()));
         }
         result.put(SIMPLE_KEY, describeOne(SIMPLE_KEY));
+        // M6-5：上下文压缩用的摘要提示词（它不是 Agent，但同样是可外置的提示词）
+        result.put(AigcConstants.COMPRESS_PROMPT_KEY, describeOne(AigcConstants.COMPRESS_PROMPT_KEY));
         return result;
     }
 

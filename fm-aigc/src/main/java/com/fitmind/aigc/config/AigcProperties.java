@@ -20,6 +20,124 @@ public class AigcProperties {
     private Prompt prompt = new Prompt();
     private Rag rag = new Rag();
     private Tool tool = new Tool();
+    private Memory memory = new Memory();
+    private Stop stop = new Stop();
+
+    /**
+     * 会话记忆配置。
+     *
+     * <p>★★ <b>本项目对"记忆"采用双层结构，这是与常见实现最大的结构差异：</b></p>
+     * <table border="1">
+     *   <tr><th>层</th><th>存哪</th><th>内容</th><th>会不会丢</th></tr>
+     *   <tr><td>上下文窗口</td><td>Redis List</td><td>最近 N 轮原文 + 早期摘要</td>
+     *       <td><b>会</b>：LTRIM 截断、压缩后丢弃、TTL 过期</td></tr>
+     *   <tr><td>完整档案</td><td>MySQL {@code chat_message}</td><td>全部消息（含指标与卡片参数）</td>
+     *       <td><b>不会</b></td></tr>
+     * </table>
+     *
+     * <p>常见实现只有第一层（Redis），于是"历史记录"和"模型上下文"是同一份数据，
+     * 导致两个需求互相牵制：为了让模型记得久就得留得多，留得多又让列表页与存储成本失控。
+     * 拆成两层之后各管一件事 —— <b>Redis 那份可以被压缩、被截断、被丢弃，
+     * 因为它只是"这次要喂给模型的窗口"；MySQL 那份一条都不能少，因为它是记录。</b></p>
+     */
+    @Data
+    public static class Memory {
+
+        /** 总开关。关掉就是"每次对话都是新的"（排查"是不是历史在捣乱"时很有用） */
+        private boolean enabled = true;
+
+        /**
+         * 送进 prompt 的最近轮数（1 轮 = 1 问 + 1 答 = 2 条消息）。
+         *
+         * <p>★ 为什么是"轮数"而不是"条数"：调这个参数的人关心的是
+         * "AI 记得最近几句话"，而不是"列表里有几条记录"。用轮数表达，
+         * 改配置时不会出现"设了 7 条结果把某一轮的问和答拆开"这种别扭情况。</p>
+         */
+        private int recentTurns = 6;
+
+        /**
+         * Redis 列表保留的消息条数上限（超出用 {@code LTRIM} 截断）。
+         *
+         * <p>它是<b>兜底护栏</b>而不是主力：正常情况下压缩（见 {@link Compress}）
+         * 会让列表远小于这个数。它防的是"压缩被关掉/失败时列表无限增长"，
+         * 那种情况下 Redis 内存会一直涨，而涨到报警之前没有任何症状。</p>
+         */
+        private int maxMessages = 200;
+
+        /** 记忆的 TTL（天）。★ 必须有 TTL：否则不活跃的会话会永久占着 Redis 内存 */
+        private int ttlDays = 7;
+
+        /**
+         * 上下文压缩配置。
+         *
+         * <p>★★ <b>修的是常见实现一个真实缺陷</b>：它的压缩靠
+         * "模型输出里出现了 agentName"来触发，而这个条件在<b>流式路径下永远不成立</b>
+         * （流式的输出是逐片的，收尾时那段带 agentName 的文本压根不存在）——
+         * 于是"开了压缩"与"没开"在线上的行为完全一样，且没有任何报错。</p>
+         *
+         * <p>本项目按<b>可观测的数量指标</b>触发（消息条数 / 字符数），
+         * 与"模型输出了什么"无关 —— 于是<b>同步与流式两条路径必然都生效</b>
+         * （实际上本项目只有一条路径：非流式接口就是流式的事件消费者，
+         * 见 {@code ChatServiceImpl.chat}）。</p>
+         */
+        private Compress compress = new Compress();
+
+        @Data
+        public static class Compress {
+
+            private boolean enabled = true;
+
+            /** 触发压缩的消息条数（超过它就压缩） */
+            private int triggerMessages = 16;
+
+            /** 触发压缩的字符数（与条数"或"的关系，谁先到算谁）—— 长回答会让条数没到而字符数爆掉 */
+            private int triggerChars = 3000;
+
+            /** 压缩后保留的最近原文条数（其余进摘要） */
+            private int keepMessages = 6;
+
+            /** 摘要字符上限（避免摘要本身无限增长成新的负担） */
+            private int maxSummaryChars = 800;
+
+            /**
+             * 压缩调用模型的超时（毫秒）。
+             *
+             * <p>★ 比主回答超时短得多：压缩是<b>同步</b>发生在首字之前的一次额外调用，
+             * 它拖住的是用户等待的第一个字。超时就放弃本次压缩（下轮再试），
+             * 而不是让用户为一个后台优化多等几十秒。</p>
+             */
+            private int timeoutMs = 15_000;
+        }
+    }
+
+    /**
+     * 分布式打断配置。
+     */
+    @Data
+    public static class Stop {
+
+        /**
+         * "正在生成"标记的 TTL（秒）。
+         *
+         * <p>★★ 这是<b>兜底</b>，也是常见实现缺的那一块。它的作用是：
+         * 无论进程怎么挂（被 kill、断连、cancel 没触发），
+         * 标记都会在 TTL 后自动消失 —— 于是"会话永久卡死"在结构上不可能发生。
+         * 没有 TTL 的标记是"状态"，有 TTL 的标记是"租约"，这就是区别。</p>
+         */
+        private int ttlSeconds = 120;
+
+        /**
+         * 生成过程中检查打断标记的最小间隔（毫秒）。
+         *
+         * <p>★ 为什么需要节流：每个分片都查一次 Redis 的话，
+         * 一段 200 字的回答（分片 4 字）就是 50 次 Redis 往返 ——
+         * 为了一个"用户可能根本不会点"的停止按钮，给每一次对话都加上 50 次网络往返。</p>
+         *
+         * <p>代价是停止有最多这个间隔的延迟（默认 200ms），对"点停止"这个动作
+         * 完全无感。这是一个明确的取舍：<b>用 200ms 的停止延迟换掉 50 次往返。</b></p>
+         */
+        private int checkIntervalMs = 200;
+    }
 
     @Data
     public static class Chat {

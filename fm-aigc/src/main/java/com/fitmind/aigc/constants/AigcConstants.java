@@ -57,6 +57,70 @@ public final class AigcConstants {
     /** prompt 快照保留条数 */
     public static final int MOCK_PROMPT_SNAPSHOT_LIMIT = 30;
 
+    // ==================== 会话记忆与打断（M6-5） ====================
+
+    /** 摘要消息的角色标记（写在记忆消息里的 role 值，不是 SSE 角色） */
+    public static final String ROLE_SUMMARY = "summary";
+
+    /** 会话消息列表（Redis List）：{@code aigc:mem:{sessionId}} */
+    public static final String MEMORY_KEY_PREFIX = "aigc:mem:";
+    /** 会话摘要（Redis String）：{@code aigc:mem:summary:{sessionId}} */
+    public static final String SUMMARY_KEY_PREFIX = "aigc:mem:summary:";
+    /**
+     * "这一轮正在生成"的标记：{@code aigc:gen:{sessionId}}，值是 requestId。
+     *
+     * <p>★ 值存 requestId 而不是"存在即代表正在生成"，是为了支持
+     * <b>同会话连发</b>的场景：新一轮覆盖标记之后，旧一轮检查时会发现
+     * "值不是自己了"从而主动终止 —— 这正是"新问题接管旧回答"该有的行为。</p>
+     */
+    public static final String GENERATING_KEY_PREFIX = "aigc:gen:";
+
+    /**
+     * 摘要注入 prompt 时的起始标记。
+     *
+     * <p>★ 与 {@link #RAG_CONTEXT_HEADER} 同一个理由：<b>验收要能断言
+     * "摘要确实进了 prompt"</b>，而"回答看起来还记得前面聊过什么"只是间接证据。</p>
+     */
+    public static final String SUMMARY_HEADER = "【历史对话摘要】";
+
+    /** 压缩（对话摘要）用的提示词 key，文件名 {@code prompts/compress.txt} */
+    public static final String COMPRESS_PROMPT_KEY = "compress";
+
+    /**
+     * 待压缩对话块的起始标记（压缩请求的载荷里用它把"已有摘要"与"新对话"分开）。
+     *
+     * <p>★ 它同时被三处用到：{@code ContextCompressor}（拼载荷）、
+     * {@code MockChatModel}（抽取内容生成确定性摘要）、以及读取它的人。
+     * 抽成常量而不是各写一遍字符串，理由与 M6-4 的 {@code COMMON_GUARD} 一样：
+     * <b>靠"记得两边改一致"维持的约定，早晚会有一边没改。</b></p>
+     */
+    public static final String COMPRESS_TRANSCRIPT_HEADER = "【待压缩对话】";
+
+    /**
+     * ★ 摘要任务的 system 提示词语义特征 —— Mock 通道靠它识别"这是一次摘要调用"。
+     *
+     * <p>为什么不用"prompt 里出现了某个测试标记"：提示词是放在 Nacos 上给人改的，
+     * 测试标记混进生产提示词既难看又容易被误删。用<b>语义特征</b>判定，
+     * 意味着"改了摘要提示词的措辞但保留了身份描述"不会让链路失效
+     * （与 M6-2 的路由识别、M6-3 的拒答识别是同一套做法）。</p>
+     */
+    public static final String COMPRESS_SYSTEM_MARK = "对话摘要助手";
+
+    /** Mock 通道产出摘要时的固定前缀（验收据此断言"摘要链路真的跑了"） */
+    public static final String COMPRESS_RESULT_PREFIX = "【摘要】";
+
+    public static String memoryKey(String sessionId) {
+        return MEMORY_KEY_PREFIX + sessionId;
+    }
+
+    public static String summaryKey(String sessionId) {
+        return SUMMARY_KEY_PREFIX + sessionId;
+    }
+
+    public static String generatingKey(String sessionId) {
+        return GENERATING_KEY_PREFIX + sessionId;
+    }
+
     // ==================== 知识库元数据字段（M6-3） ====================
 
     /**
@@ -121,6 +185,8 @@ public final class AigcConstants {
 
     /** 会话标题取自首轮提问的前 N 个字 */
     public static final int SESSION_TITLE_MAX_LEN = 20;
+    /** 会话列表"最后一句"预览的截断长度（列表是一行文字，太长会挤掉时间与按钮） */
+    public static final int SESSION_PREVIEW_MAX_LEN = 60;
     /** 会话列表默认页大小上限 */
     public static final int SESSION_PAGE_MAX_SIZE = 50;
 

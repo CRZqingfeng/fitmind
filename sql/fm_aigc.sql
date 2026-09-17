@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS `chat_session`
     `user_id`     BIGINT       NOT NULL COMMENT '归属用户',
     `title`       VARCHAR(128)          DEFAULT NULL COMMENT '会话标题（取首轮提问的前 N 字）',
     `msg_count`   INT          NOT NULL DEFAULT 0 COMMENT '消息条数（含提问与回答）',
+    -- M6-5 加：会话列表展示"标题 + 最后一句"。标题取自**首轮**提问，
+    -- 聊了几十轮后对用户毫无辨识度，真正能帮他认出会话的是最后一句在聊什么。
+    -- 冗余在这里而不是实时去 Redis 取：列表是分页查询，20 个会话就是 20 次往返，
+    -- 而且 Redis 那份有 TTL、会被压缩清掉 —— 列表展示不该依赖会过期的缓存。
+    `last_message` VARCHAR(255)         DEFAULT NULL COMMENT '最后一条消息预览（截断后的单行文本，M6-5）',
     `last_active` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最后活跃时间（会话列表按它倒序）',
     `create_time` DATETIME              DEFAULT CURRENT_TIMESTAMP,
     `update_time` DATETIME              DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

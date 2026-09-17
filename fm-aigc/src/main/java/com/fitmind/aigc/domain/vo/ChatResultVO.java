@@ -123,4 +123,44 @@ public class ChatResultVO {
 
     @Schema(description = "本轮工具调用次数")
     private Integer toolCallCount;
+
+    // ==================== 会话记忆与打断（M6-5） ====================
+
+    /**
+     * 本轮是否被停止。
+     *
+     * <p>★ 前端据此区分"回答完整"与"回答被停止" —— 前者不该提示重试，
+     * 后者应该给一个"继续生成"的入口。这与 STOP 事件存在的理由一脉相承：
+     * <b>让客户端能区分"正常结束"和"出事了"。</b></p>
+     */
+    @Schema(description = "本轮是否被停止（用户主动停止 / 被新一轮接管）")
+    private Boolean stopped;
+
+    /**
+     * 本轮带上了几条历史消息（含摘要那一条）。
+     *
+     * <p>★ 把它暴露出来是因为<b>多轮对话最容易"看起来生效、其实没生效"</b>：
+     * 模型即使没有历史也能答得像记得（它会根据当前提问猜上下文）。
+     * 有了这个数字，"这轮到底带了几条历史"就不再需要靠猜。</p>
+     */
+    @Schema(description = "本轮送进 prompt 的历史消息条数（含摘要）")
+    private Integer memoryHistory;
+
+    /** 本轮是否触发了上下文压缩（压缩会额外消耗一次模型调用与一段延迟） */
+    @Schema(description = "本轮是否触发上下文压缩")
+    private Boolean compressed;
+
+    /** 本轮被压缩掉的消息条数 */
+    @Schema(description = "本轮被压缩进摘要的消息条数")
+    private Integer compressedCount;
+
+    /**
+     * 本轮压缩的耗时（毫秒）。
+     *
+     * <p>★ 为什么要单独暴露它：压缩是<b>同步发生</b>在首字之前的一次额外模型调用，
+     * 所以它直接加在用户的首字等待上。有了这个数字，"这一轮为什么慢"就能被拆开看
+     * （是模型慢、还是我们在首字之前又多调了一次模型）。</p>
+     */
+    @Schema(description = "本轮上下文压缩耗时（毫秒）")
+    private Integer compressMs;
 }

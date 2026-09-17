@@ -20,6 +20,9 @@ public class ChatSessionVO {
     @Schema(description = "消息条数")
     private Integer msgCount;
 
+    @Schema(description = "最后一条消息的预览（会话列表用它提高辨识度）")
+    private String lastMessage;
+
     @Schema(description = "最后活跃时间")
     private LocalDateTime lastActive;
 

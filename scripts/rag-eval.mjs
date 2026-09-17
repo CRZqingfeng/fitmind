@@ -24,9 +24,13 @@
  * ============================================================================
  */
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import { RAG_EVAL_SET, RAG_REFUSAL_SET } from './rag-eval-set.mjs';
 
 const GATEWAY = 'http://localhost:10010';
+// ★ M6-5：评估会新建几十个会话，每个都写了 Redis 会话记忆 —— 清理时要连它一起清，
+//   否则 Redis 里会留下上百个要等 7 天 TTL 才消失的 key（实测残留 314 个）
+const REDIS_PASSWORD = (fs.readFileSync('docker/.env', 'utf8').match(/^REDIS_PASSWORD=(.*)$/m) || [])[1]?.trim();
 const MYSQL = 'C:////Program Files\\MySQL\\MySQL Server 8.0\\bin\\mysql.exe';
 const PHONE = '13800010001';
 const STUDENT_USER_ID = 1;
@@ -62,6 +66,22 @@ async function call(method, path, { body, token } = {}) {
  *   所以脚本自己负责收尾，不留给人记。
  */
 function cleanup() {
+  // ★ 必须在删 MySQL 之前把 session_id 取出来（记忆 key 是按 session_id 命名的）
+  const sids = (spawnSync(MYSQL,
+    ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e',
+      `SELECT session_id FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`],
+    { encoding: 'utf8' }).stdout || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  // ★ 批量 DEL：评估一次会产生上百个会话（每个会话 2~3 个 key），
+  //   逐个 docker exec 要几分钟纯等待 —— 批量化之后只要几次调用。
+  const memKeys = sids.flatMap((sid) => [
+    `aigc:mem:${sid}`, `aigc:mem:summary:${sid}`, `aigc:gen:${sid}`,
+  ]);
+  for (let i = 0; i < memKeys.length; i += 100) {
+    spawnSync('docker',
+      ['exec', 'fm-redis', 'redis-cli', '-a', REDIS_PASSWORD, '--no-auth-warning',
+        'DEL', ...memKeys.slice(i, i + 100)],
+      { encoding: 'utf8' });
+  }
   for (const q of [
     `DELETE FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID}`,
     `DELETE FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`,

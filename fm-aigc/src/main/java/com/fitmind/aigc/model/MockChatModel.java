@@ -96,6 +96,11 @@ public class MockChatModel implements ChatModel {
     /** 最终回答里回显工具结果的最大字符数（太长会把回答撑爆） */
     private static final int MAX_TOOL_ECHO = 400;
 
+    /** Mock 摘要里最多回显几条历史片段 */
+    private static final int SUMMARIZE_FRAGMENTS = 3;
+    /** 每条片段截断长度（够验收断言"早期内容确实在摘要里"即可） */
+    private static final int SUMMARIZE_FRAGMENT_LEN = 16;
+
     private final AigcProperties props;
     private final StringRedisTemplate redis;
 
@@ -175,6 +180,19 @@ public class MockChatModel implements ChatModel {
         if (userText.contains(CMD_ERROR)) {
             log.info("[Mock通道] 按指令模拟模型服务异常");
             return new MockPlan("", new RuntimeException("模拟模型服务异常"), 0, List.of());
+        }
+
+        // ★ M6-5：摘要任务（上下文压缩）—— 必须排在"按关键词生成回答"之前。
+        //
+        //   为什么：压缩请求的 user 消息里是"整段待压缩的对话"，
+        //   它必然包含大量健身关键词（推荐、蛋白质、减脂……）。
+        //   如果不先拦下来，Mock 会把压缩请求当成一次普通提问，
+        //   返回一段健身回答 —— 于是"摘要"变成了一段奇怪的话塞进摘要键里，
+        //   而链路看起来一切正常（这就是"Mock 没覆盖到 = 这条链路在验收里没跑"）。
+        if (isSummarizeTask(prompt)) {
+            String summary = summarize(prompt);
+            log.info("[Mock通道] 识别为对话摘要任务 → 返回确定性摘要（{} 字）", summary.length());
+            return new MockPlan(summary, null, props.getMock().getChunkDelayMs(), List.of());
         }
 
         // ★ M6-4：工具结果已就位 —— 先判断"还差工具吗"，差就继续调，不差才收尾。
@@ -385,6 +403,60 @@ public class MockChatModel implements ChatModel {
             cleaned = q;
         }
         return cleaned.length() > 8 ? cleaned.substring(0, 8) : cleaned;
+    }
+
+    // ==================== M6-5：上下文摘要模拟 ====================
+
+    /**
+     * 这一次调用是不是"压缩历史对话"（而不是在回答用户）。
+     *
+     * <p>判定依据是 <b>system 提示词的语义特征</b>（{@code AigcConstants.COMPRESS_SYSTEM_MARK}），
+     * 不是"prompt 里带了某个测试标记" —— 与路由识别、拒答识别同一套做法：
+     * 提示词改了措辞只要还保留身份描述就不会失效，生产提示词里也不需要塞测试专用的东西。</p>
+     */
+    private boolean isSummarizeTask(Prompt prompt) {
+        for (Message m : prompt.getInstructions()) {
+            if (m instanceof SystemMessage sm) {
+                String text = sm.getText();
+                if (text != null && text.contains(AigcConstants.COMPRESS_SYSTEM_MARK)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 生成确定性摘要。
+     *
+     * <p>★ 摘要里<b>刻意带上被压缩对话的前几条片段</b>：这是"早期内容真的被搬进了摘要"
+     * 的直接证据。验收可以据此断言一件很有说服力的事 ——
+     * <b>聊到第 20 轮时，prompt 里仍然能找到第 1 轮说过的内容</b>
+     * （它不在最近 N 轮的原文里，只可能在摘要里）。</p>
+     */
+    private String summarize(Prompt prompt) {
+        String text = lastUserText(prompt);
+        int idx = text.indexOf(AigcConstants.COMPRESS_TRANSCRIPT_HEADER);
+        String body = idx >= 0 ? text.substring(idx + AigcConstants.COMPRESS_TRANSCRIPT_HEADER.length()) : text;
+
+        List<String> fragments = new ArrayList<>();
+        int lines = 0;
+        for (String line : body.split("\n")) {
+            String t = line.trim();
+            if (t.isEmpty()) {
+                continue;
+            }
+            lines++;
+            if (fragments.size() < SUMMARIZE_FRAGMENTS) {
+                // 去掉 transcript 里的 "user: " / "assistant: " 前缀，
+                // 让摘要读起来像"人写的"而不是"回显的原文"（真模型也会这么做）
+                String clean = t.replaceFirst("^(user|assistant):\\s*", "");
+                fragments.add(clean.length() > SUMMARIZE_FRAGMENT_LEN
+                        ? clean.substring(0, SUMMARIZE_FRAGMENT_LEN) : clean);
+            }
+        }
+        return AigcConstants.COMPRESS_RESULT_PREFIX + " 之前聊过：" + String.join(" / ", fragments)
+                + "。（Mock 通道 · 由 " + lines + " 条历史压缩而来）";
     }
 
     // ==================== 通用判定与生成 ====================

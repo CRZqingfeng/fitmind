@@ -147,6 +147,33 @@ async function call(method, path, { body, token, retryOn401 = true } = {}) {
   return result;
 }
 
+/**
+ * ES 直连小工具（验收脚本读/写检索侧的真实状态，不走服务）。
+ *
+ * ★ 为什么验收脚本要直连 ES：课程索引的状态**没有任何业务接口能反映**。
+ *   "课程进没进检索索引"是 fm-course 与 fm-search 之间的一个副作用，
+ *   只断言接口返回是看不到它的（这正是 §四 第 16 条那条"残留自检"要防的东西）。
+ */
+const ES_URL = 'http://localhost:9201';
+
+async function esDeleteDoc(index, id) {
+  try {
+    await fetch(`${ES_URL}/${index}/_doc/${id}`, { method: 'DELETE' });
+  } catch (e) {
+    console.log(`    （ES 删除失败，不影响结论：${String(e).slice(0, 60)}）`);
+  }
+}
+
+async function esDocCount(index, id) {
+  try {
+    const res = await fetch(`${ES_URL}/${index}/_count?q=id:${id}`);
+    const j = await res.json();
+    return j?.count ?? -1;
+  } catch {
+    return -1;
+  }
+}
+
 /** 轮询等待条件成立（MQ 异步、定时任务都用它，避免盲目 sleep） */
 async function waitUntil(fn, timeoutMs = 10000, interval = 300) {
   const deadline = Date.now() + timeoutMs;
@@ -595,8 +622,8 @@ async function main() {
 
   const promptRes = await call('GET', '/ais/chat/prompts', { token });
   const promptMap = promptRes.json?.data || {};
-  check('提示词来源接口返回全部 6 项（5 个 Agent + 基线）',
-    Object.keys(promptMap).length === 6, `项数=${Object.keys(promptMap).length}`);
+  check('提示词来源接口返回全部 7 项（5 个 Agent + 基线 + 摘要）',
+    Object.keys(promptMap).length === 7, `项数=${Object.keys(promptMap).length}`);
   check('★ 每项都有明确的来源（能查"当前到底用的哪一份"）',
     Object.values(promptMap).every((v) => v && v.length > 0),
     JSON.stringify(promptMap));
@@ -1025,8 +1052,213 @@ async function main() {
     Number(kbAns?.toolCallCount || 0) === 0 && Number(kbAns?.ragHits) > 0,
     `toolCalls=${kbAns?.toolCallCount} ragHits=${kbAns?.ragHits}`);
 
-  // ==================== 14. 清理与自检 ====================
-  section('14. 清理与自检');
+  // ==================== 14. ★★ 会话记忆 + 分布式打断 + 上下文压缩（M6-5） ====================
+  section('14. ★★ 会话记忆（多轮上下文）+ 分布式打断 + 上下文压缩');
+
+  const MEM_KEY = (sid) => `aigc:mem:${sid}`;
+  const SUM_KEY = (sid) => `aigc:mem:summary:${sid}`;
+  const GEN_KEY = (sid) => `aigc:gen:${sid}`;
+  const memSid = `accept-m65-${Date.now()}`;
+  const MEM_SIDS = [memSid];
+
+  // ---- ① 多轮上下文真的进了 prompt ----
+  const mq1 = '我身高182体重64，想增肌';
+  const mq2 = '那蛋白质要吃多少';
+  const mq3 = '减脂和增肌能同时做吗';
+  const ma1 = (await call('POST', CHAT_API, { body: { content: mq1, sessionId: memSid }, token })).json?.data;
+  check('★ 第 1 轮：新会话没有历史', Number(ma1?.memoryHistory) === 0, `memoryHistory=${ma1?.memoryHistory}`);
+
+  const ma2 = (await call('POST', CHAT_API, { body: { content: mq2, sessionId: memSid }, token })).json?.data;
+  check('★ 第 2 轮：带上了 2 条历史（上一轮的问 + 答）',
+    Number(ma2?.memoryHistory) === 2, `memoryHistory=${ma2?.memoryHistory}`);
+
+  // ★★ 直接看 prompt 快照 —— 模型输出是间接证据，"它看到了什么"才是直接证据
+  const snapM2 = redis('LINDEX', MOCK_PROMPT_SNAPSHOT_KEY, '0') || '';
+  check('★★ 第 1 轮的提问确实进了第 2 轮的 prompt（prompt 快照直接证据）',
+    snapM2.includes(mq1), `快照 ${snapM2.length} 字，未找到第 1 轮提问`);
+  check('★ 历史里既有用户提问也有助手回答（不是只把提问带上）',
+    snapM2.includes(mq1) && snapM2.includes('1.6~2.2 克蛋白质'),
+    '快照里应同时有第 1 轮的提问与回答');
+  check('★ 历史排在当前提问之前（否则模型会把历史里的某句当成新问题）',
+    snapM2.indexOf(mq1) >= 0 && snapM2.indexOf(mq1) < snapM2.indexOf(mq2),
+    `历史位置=${snapM2.indexOf(mq1)}，当前提问位置=${snapM2.indexOf(mq2)}`);
+
+  const ma3 = (await call('POST', CHAT_API, { body: { content: mq3, sessionId: memSid }, token })).json?.data;
+  check('★ 第 3 轮：带上了 4 条历史', Number(ma3?.memoryHistory) === 4, `memoryHistory=${ma3?.memoryHistory}`);
+
+  // ★ 再聊 4 轮凑到 7 轮 —— 这一步是**为了让"最近 N 条"这个窗口真的起作用**：
+  //   只有 3 轮时，窗口（6 轮 = 12 条）比全部消息还大，
+  //   "取最新"和"取最旧"看起来一模一样 —— 而 off-by-one 恰恰只在消息数超过窗口时才暴露。
+  //   （常见实现那个 LRANGE 0 N 的 bug 之所以长期没被发现，就是同样的原因。）
+  const mq4 = '练完要拉伸吗';
+  const mq5 = '睡眠不好影响增肌吗';
+  const mq6 = '一周练三次够吗';
+  const mq7 = '还有什么要注意的吗';
+  let maLast = null;
+  for (const q of [mq4, mq5, mq6, mq7]) {
+    maLast = (await call('POST', CHAT_API, { body: { content: q, sessionId: memSid }, token })).json?.data;
+  }
+  check('★ 历史条数被 recentTurns 限制住（窗口有上限，不会越聊越贵）',
+    Number(maLast?.memoryHistory) === 12, `memoryHistory=${maLast?.memoryHistory}`);
+
+  // ---- ② Redis 上下文窗口 ----
+  const memLen = Number(redis('LLEN', MEM_KEY(memSid)));
+  check('★ 上下文窗口存下了 14 条（7 轮 × 问+答）', memLen === 14, `LLEN=${memLen}`);
+  const memTtl = Number(redis('TTL', MEM_KEY(memSid)));
+  check('★ 记忆带 TTL（不活跃的会话不会永久占着 Redis）',
+    memTtl > 0 && memTtl <= 7 * 24 * 3600, `TTL=${memTtl}s`);
+
+  // ---- ③ ★★ 取的是"最新 N 条"而不是"最旧 N 条"（修正常见实现 A3 的 off-by-one） ----
+  const memView = (await call('GET', `/ais/chat/sessions/${memSid}/memory`, { token })).json?.data;
+  const previews = (memView?.recentPreview || []).map((x) => x.preview).join(' | ');
+  check('★★ 上下文窗口取回的是**最新**几条（含最后一轮）',
+    previews.includes(mq7), `预览=${previews.slice(0, 100)}`);
+  check('★★ 而不是最旧的几条 —— 常见实现 LRANGE 0 N 取到的正是最旧的 N+1 条',
+    !previews.includes(mq1), `预览=${previews.slice(0, 100)}`);
+  check('★ 该接口同时给出摘要与 TTL 状态（"AI 到底记得什么"一行请求就能看）',
+    memView && 'summaryChars' in memView && 'ttlSeconds' in memView && 'messageCount' in memView,
+    JSON.stringify(Object.keys(memView || {})));
+
+  // ---- ④ ★★ 分布式打断 ----
+  const stopSid = `${memSid}-stop`;
+  MEM_SIDS.push(stopSid);
+  // 用慢流制造"用户有时间点停止"的窗口（分片间隔 ×10）
+  const slowPending = call('POST', CHAT_API,
+    { body: { content: '[MOCK:SLOW]减脂期热量缺口开多大', sessionId: stopSid }, token });
+  await sleep(1200);
+  const markBefore = redis('GET', GEN_KEY(stopSid));
+  check('★ 生成期间存在"正在生成"标记（多实例部署时另一个实例靠它感知）',
+    !!markBefore && markBefore.length > 0, `标记=${markBefore}`);
+
+  const stopRes = await call('POST', '/ais/chat/stop', { body: { sessionId: stopSid }, token });
+  check('★ 停止接口返回被停止的那一轮 id', stopRes.json?.data === markBefore,
+    `stop 返回=${stopRes.json?.data}，标记=${markBefore}`);
+
+  const slowAns = (await slowPending).json?.data;
+  check('★★ 被停止的那一轮被标记为 stopped（前端能区分"回答完整"与"被停止"）',
+    slowAns?.stopped === true, `stopped=${slowAns?.stopped}`);
+  check('★★ 停止真的生效：只产出了一部分内容就结束',
+    (slowAns?.content || '').length > 0 && (slowAns?.content || '').length < 50,
+    `长度=${(slowAns?.content || '').length}`);
+  check('★ 停止后标记被清理（用"值相等才删"避免误删下一轮的标记）',
+    !redis('GET', GEN_KEY(stopSid)), `残留=${redis('GET', GEN_KEY(stopSid))}`);
+
+  // 已生成的部分必须落库：用户看到了一半，记录里不能什么都没有
+  const partial = sql(`SELECT CHAR_LENGTH(content) FROM fm_aigc.chat_message
+    WHERE session_id='${stopSid}' AND role='assistant' ORDER BY id DESC LIMIT 1`);
+  check('★★ 被停止那轮的"已生成部分"仍然落库（历史记录里能看到当时说到哪了）',
+    Number(partial) > 0 && Number(partial) < 50, `落库长度=${partial}`);
+
+  // ---- ⑤ 停止之后会话必须还能用（常见实现在这一步是永久卡死） ----
+  const afterStop = (await call('POST', CHAT_API,
+    { body: { content: '那还能继续聊吗', sessionId: stopSid }, token })).json?.data;
+  check('★★ 停止后同一会话可以继续对话（标记有 TTL 兜底，"状态"变成了"租约"）',
+    !!afterStop?.content && afterStop?.stopped !== true,
+    `stopped=${afterStop?.stopped} 内容长度=${(afterStop?.content || '').length}`);
+
+  const stopAgain = await call('POST', '/ais/chat/stop', { body: { sessionId: stopSid }, token });
+  check('★ 没有正在生成的轮次时停止返回 null 且不报错（"停止"是幂等愿望，不是指令）',
+    stopAgain.status === 200 && stopAgain.json?.data === null,
+    `status=${stopAgain.status} data=${JSON.stringify(stopAgain.json?.data)}`);
+
+  // ---- ⑥ ★★ 同会话连发：新问题接管旧回答 ----
+  //   这一条正是"标记的值存 requestId（而不是只判断键存在）"的收益
+  const takeSid = `${memSid}-takeover`;
+  MEM_SIDS.push(takeSid);
+  const firstPending = call('POST', CHAT_API,
+    { body: { content: '[MOCK:SLOW]减脂期该怎么吃', sessionId: takeSid }, token });
+  await sleep(1200);
+  const markFirst = redis('GET', GEN_KEY(takeSid));
+  await call('POST', CHAT_API, { body: { content: '换个问题：蛋白质要吃多少', sessionId: takeSid }, token });
+  const markSecond = redis('GET', GEN_KEY(takeSid));
+  const firstAns = (await firstPending).json?.data;
+  check('★★ 同会话连发时旧的一轮自动让位（标记值变了 → 旧轮发现自己不再是"最新那轮"）',
+    markSecond !== markFirst && firstAns?.stopped === true,
+    `旧标记=${markFirst} 新标记=${markSecond} 旧轮 stopped=${firstAns?.stopped}`);
+
+  // ---- ⑦ ★★ 上下文压缩 ----
+  const compSid = `${memSid}-comp`;
+  MEM_SIDS.push(compSid);
+  const compQs = [
+    '我想练哑铃，家里只有哑铃和单杠',
+    '每次练多久合适',
+    '深蹲膝盖疼怎么办',
+    '一周练三次够吗',
+    '练完要不要拉伸',
+    '睡眠不好影响增肌吗',
+    '蛋白粉有必要买吗',
+    '体重一直不变怎么办',
+    '今天该练什么',
+    '还有什么要注意的吗',
+  ];
+  const ctxChars = [];
+  let compressTurn = null;
+  let compressIndex = -1;
+  for (let i = 0; i < compQs.length; i++) {
+    const d = (await call('POST', CHAT_API, { body: { content: compQs[i], sessionId: compSid }, token })).json?.data;
+    // ★ 用 prompt 快照的长度作为"上下文长度"的度量，而不是从回答文本里抠那个数字：
+    //   回答的格式会随链路变化（走工具、拒答时格式都不同），
+    //   而"送进模型的 prompt 有多长"才是这一节真正要控制的东西。
+    ctxChars.push((redis('LINDEX', MOCK_PROMPT_SNAPSHOT_KEY, '0') || '').length);
+    if (d?.compressed && !compressTurn) {
+      compressTurn = d;
+      compressIndex = i;
+    }
+  }
+  check('★★ 对话够长时触发上下文压缩（常见实现的压缩条件在流式路径下永远不成立）',
+    !!compressTurn, `十轮里没有一轮触发压缩，contextChars=${ctxChars.join(',')}`);
+  check('★ 压缩的是窗口外的一批消息（不是"压 1 条做样子"）',
+    Number(compressTurn?.compressedCount) >= 10, `compressedCount=${compressTurn?.compressedCount}`);
+  check('★ 压缩后窗口只剩"摘要 + 最近几轮原文"',
+    Number(compressTurn?.memoryHistory) > 0 && Number(compressTurn?.memoryHistory) <= 8,
+    `memoryHistory=${compressTurn?.memoryHistory}`);
+  check('★ 压缩的开销可观测（它多花了一次模型调用，这段延迟加在用户的首字之前）',
+    Number(compressTurn?.compressMs) > 0, `compressMs=${compressTurn?.compressMs}`);
+
+  const sumTtl = Number(redis('TTL', SUM_KEY(compSid)));
+  check('★ 摘要也有 TTL（不活跃会话不会永久占着 Redis）', sumTtl > 0, `TTL=${sumTtl}s`);
+
+  const snapComp = redis('LINDEX', MOCK_PROMPT_SNAPSHOT_KEY, '0') || '';
+  check('★★ 摘要块出现在 prompt 里（【历史对话摘要】）',
+    snapComp.includes('【历史对话摘要】'), 'prompt 快照里没有摘要块');
+  check('★★ 窗口外的早期内容靠摘要留在模型眼前（第 1 轮已不在最近几轮的原文里）',
+    snapComp.includes('我想练哑铃'), '摘要里没有早期对话的痕迹');
+  check('★★ 压缩后上下文长度不再随轮数线性增长（比不压缩时更短）',
+    ctxChars[compressIndex] > 0 && ctxChars[compressIndex] < ctxChars[compressIndex - 1],
+    `压缩前 ${ctxChars[compressIndex - 1]} 字 → 压缩后 ${ctxChars[compressIndex]} 字`);
+
+  // ---- ⑧ 会话列表：最后一条消息预览 ----
+  const sessList = (await call('GET', `${SESSIONS_API}?pageNo=1&pageSize=10`, { token })).json?.data?.list || [];
+  const mineRow = sessList.find((s) => s.sessionId === memSid);
+  check('★ 会话列表带"最后一条消息"预览（标题只取首轮提问，聊久了没有辨识度）',
+    !!mineRow?.lastMessage && mineRow.lastMessage.length > 0,
+    `lastMessage=${JSON.stringify(mineRow?.lastMessage)}`);
+  check('★ 预览是单行文本（AI 回答里的换行会把列表行高撑变形）',
+    !/[\r\n]/.test(mineRow?.lastMessage || ''), JSON.stringify(mineRow?.lastMessage));
+  const realMsgCount = sql(`SELECT COUNT(*) FROM fm_aigc.chat_message WHERE session_id='${memSid}'`);
+  check('★ 会话列表的消息数与实际落库条数一致',
+    Number(mineRow?.msgCount) === Number(realMsgCount),
+    `列表=${mineRow?.msgCount} 库=${realMsgCount}`);
+
+  // ---- ⑨ ★★ 归属校验：拿到别人的 sessionId 也不能掐掉对方的回答 / 看对方的上下文 ----
+  const otherStop = await call('POST', '/ais/chat/stop', { body: { sessionId: memSid }, token: coachToken });
+  check('★★ 别人的会话不能停止（否则拿到 sessionId 就能掐掉对方正在生成的回答）',
+    otherStop.json?.code !== 200, `code=${otherStop.json?.code} msg=${otherStop.json?.msg}`);
+  const otherView = await call('GET', `/ais/chat/sessions/${memSid}/memory`, { token: coachToken });
+  check('★★ 别人的会话看不到上下文窗口（摘要里含用户的个人信息）',
+    otherView.json?.code !== 200, `code=${otherView.json?.code} msg=${otherView.json?.msg}`);
+
+  // ==================== 15. 清理与自检 ====================
+  section('15. 清理与自检');
+
+  // ★ M6-5：**必须在删 MySQL 之前**把 session_id 取出来 —— 会话记忆的 Redis key
+  //   是按 session_id 命名的，会话删了就再也对不上号。
+  //   ⚠️ 另一个坑：不能只清"登记过的那几个会话"。本脚本还会产生几十个会话
+  //   （第 11/12 组的检索评估集每问一句就新建一个），它们同样写了记忆 ——
+  //   只清登记的，Redis 里会留下上百个要等 7 天 TTL 才消失的 key
+  //   （实测残留 314 个，是"跑完看起来干净、其实没干净"的典型）。
+  const sidsBeforeClean = sql(`SELECT session_id FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`)
+    .split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
   aiCleanup();
   // ★ M6-4 建的课程与订单也要清：下架（同时清 ES 索引）+ 删业务表残留。
   //   本项目的课程是「草稿表 + 正式表」两段式，两张都要删，否则残留的草稿
@@ -1034,8 +1266,18 @@ async function main() {
   if (m64Course?.courseId) {
     await call('POST', '/cs/courses/downShelf', { token: coachToken, body: { id: m64Course.courseId } });
     const cid = m64Course.courseId;
-    sqlSoft(`DELETE FROM fm_course.course_content_draft WHERE catalogue_id IN (SELECT id FROM fm_course.course_catalogue_draft WHERE course_id=${cid})`);
-    sqlSoft(`DELETE FROM fm_course.course_content WHERE catalogue_id IN (SELECT id FROM fm_course.course_catalogue WHERE course_id=${cid})`);
+    // ★★ downShelf 只把 MySQL 的状态改成"已下架"，**它不删 ES 文档** ——
+    //    所以这里必须自己删，否则 fitmind_course 里会永久留下一条孤儿文档。
+    //    这类"清理漏了一侧"的问题很隐蔽：MySQL 查起来是干净的，
+    //    只有直连 ES 才发现还有一条（写这条注释是因为本轮真的漏了）。
+    await esDeleteDoc('fitmind_course', cid);
+    // ⚠️ 这两张表的 `id` **就是 course_id**（没有 catalogue_id 列）。
+    //    最早按 `catalogue_id IN (...)` 写，SQL 报 1054 却被 sqlSoft 吞掉 ——
+    //    于是"清理执行了、脚本全绿"，而 content 表里每次都多留一条
+    //    （M6-4/M6-5 累计留下 471/472/473 三条，直到做环境体检才发现）。
+    //    → 教训：`sqlSoft` 的"容忍失败"必须配一条 `sql` 自检（见下方 check）。
+    sqlSoft(`DELETE FROM fm_course.course_content_draft WHERE id=${cid}`);
+    sqlSoft(`DELETE FROM fm_course.course_content WHERE id=${cid}`);
     sqlSoft(`DELETE FROM fm_course.course_catalogue_draft WHERE course_id=${cid}`);
     sqlSoft(`DELETE FROM fm_course.course_catalogue WHERE course_id=${cid}`);
     sqlSoft(`DELETE FROM fm_course.course_teacher_draft WHERE course_id=${cid}`);
@@ -1044,8 +1286,46 @@ async function main() {
     sqlSoft(`DELETE FROM fm_course.course WHERE id=${cid}`);
   }
   sqlSoft(`DELETE FROM fm_course.category WHERE name LIKE 'M4-4分类%'`);
+  // ★ 这条自检是**补上来的**：本轮发现清理段执行了、课程行却还在
+  //   （`sqlSoft` 把删除失败吞掉了）。没有它时，"课程残留"是那种
+  //   **跑完当场看不到、下次跑才炸**的问题（下次建同名课程会报"名称已存在"）。
+  //   → 清理之后必须自检，否则 `sqlSoft` 的"容忍失败"就变成了"隐藏失败"。
+  const leftCourses = sql(`SELECT COUNT(*) FROM fm_course.course WHERE name LIKE 'M6-4%'`);
+  const leftDrafts = sql(`SELECT COUNT(*) FROM fm_course.course_draft WHERE name LIKE 'M6-4%'`);
+  check('★ 验收建的课程（正式表 + 草稿表）无残留',
+    leftCourses === '0' && leftDrafts === '0', `course=${leftCourses} draft=${leftDrafts}`);
+  const esLeft = m64Course?.courseId ? await esDocCount('fitmind_course', m64Course.courseId) : 0;
+  check('★ 检索索引里没有孤儿课程文档（downShelf 不删 ES 文档）',
+    esLeft === 0, `ES 剩余 ${esLeft} 条`);
+  const cidForCheck = m64Course?.courseId || 0;
+  const leftContent = sql(`SELECT COUNT(*) FROM fm_course.course_content WHERE id=${cidForCheck}`);
+  const leftContentDraft = sql(`SELECT COUNT(*) FROM fm_course.course_content_draft WHERE id=${cidForCheck}`);
+  check('★ 课程内容表（content / content_draft）无残留',
+    leftContent === '0' && leftContentDraft === '0',
+    `content=${leftContent} content_draft=${leftContentDraft}`);
   sqlSoft(`DELETE FROM fm_trade.trade_order_detail WHERE course_id=${m64Course?.courseId || 0}`);
   sqlSoft(`DELETE FROM fm_trade.trade_order WHERE id=${orderCard?.orderId || 0}`);
+  // ★ M6-5：清掉本脚本产生的会话记忆（本次登记的 + 库里该用户的全部会话）。
+  //   记忆其实**有 7 天 TTL**，不清也不会永久残留 —— 但验收脚本的职责是
+  //   "跑完回到跑之前的样子"，把"7 天后会自己消失"留给别人去理解是不负责任的。
+  const allMemSids = [...new Set([...sidsBeforeClean, ...MEM_SIDS])];
+  const memKeys = allMemSids.flatMap((sid) => [MEM_KEY(sid), SUM_KEY(sid), GEN_KEY(sid)]);
+  // ★ 批量删：一次 `docker exec redis-cli` 在 Windows 上要 0.3~0.5s，
+  //   而这个脚本会产生一两百个会话（= 几百个 key）——
+  //   逐个删就是**几分钟纯等待**，还会把脚本拖到工具超时。
+  //   redis-cli 的 DEL / EXISTS 都支持多 key，批量化之后只要几次调用。
+  const DEL_BATCH = 100;
+  for (let i = 0; i < memKeys.length; i += DEL_BATCH) {
+    redis('DEL', ...memKeys.slice(i, i + DEL_BATCH));
+  }
+  let memLeft = 0;
+  for (let i = 0; i < memKeys.length; i += DEL_BATCH) {
+    // EXISTS 多 key 时返回"存在的个数"，正好直接累加
+    memLeft += Number(redis('EXISTS', ...memKeys.slice(i, i + DEL_BATCH)));
+  }
+  check('★ 会话记忆 / 摘要 / 生成标记都已清理', memLeft === 0,
+    `残留 ${memLeft}/${memKeys.length}（本次涉及 ${allMemSids.length} 个会话）`);
+
   const leftSession = sql(`SELECT COUNT(*) FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`);
   const leftMsg = sql(`SELECT COUNT(*) FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID}`);
   const leftSnap = redis('LLEN', MOCK_SNAPSHOT_KEY);

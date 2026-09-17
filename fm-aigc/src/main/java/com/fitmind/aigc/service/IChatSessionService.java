@@ -42,4 +42,21 @@ public interface IChatSessionService {
 
     /** 会话活跃度更新（消息数 +delta、刷新最后活跃时间） */
     void touch(String sessionId, Long userId, int delta);
+
+    /**
+     * 会话活跃度更新 + 刷新"最后一条消息预览"（M6-5）。
+     *
+     * @param lastMessage 最后一条消息正文（会截断），为空则不更新该列
+     */
+    void touch(String sessionId, Long userId, int delta, String lastMessage);
+
+    /**
+     * 断言某个会话属于当前登录用户，否则抛业务异常。
+     *
+     * <p>★ 与 {@link #listMessages} 的区别：这里只要"归属"，不要消息正文。
+     * 停止生成（{@code /chat/stop}）与查看上下文窗口（{@code /chat/sessions/**}{@code /memory}）
+     * 都需要它 —— <b>没有这道校验，任何人拿到别人的 sessionId
+     * 就能把对方正在生成的回答掐掉、或者看到对方喂给模型的上下文。</b></p>
+     */
+    void assertMine(String sessionId);
 }

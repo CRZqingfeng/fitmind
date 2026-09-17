@@ -23,4 +23,28 @@ public interface IChatService {
      * <p>给"不方便用 SSE 的调用方"与"需要精确断言指标的验收脚本"使用。</p>
      */
     ChatResultVO chat(ChatRequestDTO dto);
+
+    /**
+     * 停止某个会话正在生成的那一轮（分布式打断）。
+     *
+     * <p>★ <b>为什么不能只靠"客户端断开连接"</b>：断开只能停下
+     * <b>本实例</b>正在跑的那条流。多实例部署下，"点停止"的请求会被负载均衡
+     * 打到另一个实例 —— 那边没有这条流可断，只能通过共享的 Redis 标记
+     * 通知正在生成的那个实例（见 {@code GenerationRegistry}）。</p>
+     *
+     * <p>⚠️ 归属校验必须在前面做（{@code sessionService} 里按 userId 查一次）：
+     * 否则任何人拿到别人的 sessionId 就能把对方的回答掐掉。</p>
+     *
+     * @return 被停止的 requestId；{@code null} 表示该会话当前没有在生成的轮次
+     *         （用户点了一个已经结束的停止按钮，属正常情况，不是错误）
+     */
+    String stop(String sessionId);
+
+    /**
+     * 某个会话的"上下文窗口体检报告"。
+     *
+     * <p>★ 排查多轮对话问题（"它怎么不记得刚才说的了"）的第一站：
+     * 一眼能看到摘要、消息条数、TTL 以及最近几条的预览。</p>
+     */
+    java.util.Map<String, Object> memoryView(String sessionId);
 }

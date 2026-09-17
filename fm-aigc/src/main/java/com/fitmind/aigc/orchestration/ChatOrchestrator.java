@@ -133,13 +133,20 @@ public class ChatOrchestrator {
      */
     private OrchestrationResult simple(AgentContext context) {
         String system = promptManager.get(PromptManager.SIMPLE_KEY);
-        Flux<ChatResponse> responses = chatClient.prompt()
+        ChatClient.ChatClientRequestSpec spec = chatClient.prompt()
                 .system(s -> s.text(system + AigcConstants.COMMON_GUARD)
-                        .params(Map.of("now", DateUtil.now())))
-                .user(context.question())
+                        .params(Map.of("now", DateUtil.now())));
+        // ★ SIMPLE 分支也要带上历史：它是"最朴素的对话"，而"多轮对话"恰恰是
+        //   朴素对话最基础的能力 —— 没有历史的话，SIMPLE 就不是对照组而是残废组，
+        //   拿它跟 ROUTE/ENHANCE 比"多花了那些调用值不值"就没有可比性了。
+        if (!context.history().isEmpty()) {
+            spec = spec.messages(context.history());
+        }
+        Flux<ChatResponse> responses = spec.user(context.question())
                 .stream()
                 .chatResponse();
-        log.info("编排[SIMPLE]：sessionId={} → 纯模型对话（基线）", context.sessionId());
+        log.info("编排[SIMPLE]：sessionId={} → 纯模型对话（基线，历史 {} 条）",
+                context.sessionId(), context.history().size());
         return OrchestrationResult.of(null, responses);
     }
 }

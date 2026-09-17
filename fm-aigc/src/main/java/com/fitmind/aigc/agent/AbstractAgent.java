@@ -90,8 +90,22 @@ public abstract class AbstractAgent implements Agent {
                 // ★ 通用安全边界拼在每个 Agent 的 system 提示词末尾（只有一处定义，
                 //   不会出现"改了 4 个提示词漏了 1 个"——见 AigcConstants.COMMON_GUARD）
                 .system(s -> s.text(systemTemplate() + AigcConstants.COMMON_GUARD)
-                        .params(systemParams(context)))
-                .user(context.question());
+                        .params(systemParams(context)));
+
+        // ★ M6-5：多轮历史。
+        //
+        //   顺序是「system → 历史 → 当前提问」，而 **这个顺序由 Spring AI 保证，
+        //   不依赖调用顺序** —— 实测：即使先写 .user() 再写 .messages(...)，
+        //   最终 instructions 里 messages 依然排在最后一条 user 之前。
+        //   （这一点很关键：多轮对话的成败取决于"模型认不认得出最后那句才是它要回答的"，
+        //    若历史排到了当前提问之后，模型会把历史里的某句当成新问题。）
+        //
+        //   ⚠️ 历史里**不含当前提问**（见 AgentContext.history 的说明），
+        //   否则模型会以为自己被问了两次。
+        if (!context.history().isEmpty()) {
+            spec = spec.messages(context.history());
+        }
+        spec = spec.user(context.question());
 
         Object[] tools = tools(context);
         List<Advisor> advisors = new ArrayList<>(advisors(context));

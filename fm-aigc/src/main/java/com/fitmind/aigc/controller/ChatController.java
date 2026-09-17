@@ -2,6 +2,7 @@ package com.fitmind.aigc.controller;
 
 import com.fitmind.aigc.config.AigcProperties;
 import com.fitmind.aigc.domain.dto.ChatRequestDTO;
+import com.fitmind.aigc.domain.dto.ChatStopDTO;
 import com.fitmind.aigc.domain.vo.ChatEventVO;
 import com.fitmind.aigc.domain.vo.ChatMessageVO;
 import com.fitmind.aigc.domain.vo.ChatResultVO;
@@ -83,6 +84,36 @@ public class ChatController {
     @PostMapping
     public ChatResultVO chat(@RequestBody @Valid ChatRequestDTO dto) {
         return chatService.chat(dto);
+    }
+
+    /**
+     * 停止本会话正在生成的一轮。
+     *
+     * <p>★ <b>为什么需要一个独立的接口，而不是"客户端断开连接就够了"</b>：
+     * 断开只能停下<b>本实例</b>这条流。多实例部署下，点停止的请求会被负载均衡
+     * 打到另一个实例 —— 那边没有这条流可断，只能通过共享的 Redis 标记
+     * 通知真正在生成的那个实例。这就是"分布式打断"与"本机 cancel"的区别。</p>
+     *
+     * <p>返回被停止的 requestId；返回 null 表示该会话当前没有在生成的轮次
+     * （用户点了一个已经结束的停止按钮 —— 正常情况，不报错，
+     * <b>因为"停止"是一个幂等愿望而不是一条指令</b>）。</p>
+     */
+    @Operation(summary = "停止本会话正在生成的一轮（分布式打断）")
+    @PostMapping("/stop")
+    public String stop(@RequestBody @Valid ChatStopDTO dto) {
+        return chatService.stop(dto.getSessionId());
+    }
+
+    /**
+     * 某个会话的"上下文窗口体检报告"。
+     *
+     * <p>★ 排查"它怎么不记得刚才说的了"这类问题的第一站：
+     * 不用再加一轮对话去试探，一行请求就能看到摘要、条数、TTL 与最近几条预览。</p>
+     */
+    @Operation(summary = "会话的上下文窗口（摘要 / 条数 / TTL / 最近几条预览）")
+    @GetMapping("/sessions/{sessionId}/memory")
+    public Map<String, Object> memory(@PathVariable String sessionId) {
+        return chatService.memoryView(sessionId);
     }
 
     @Operation(summary = "我的会话列表")
