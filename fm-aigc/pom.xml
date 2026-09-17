@@ -59,6 +59,14 @@
         <hutool.version>5.8.36</hutool.version>
         <swagger.version>2.2.19</swagger.version>
         <mybatis-plus.version>3.5.9</mybatis-plus.version>
+        <!--
+          ★ M6-3 新增：ES 客户端版本必须和服务端同线（服务端是 7.17.22）。
+          ⚠️ 这个属性必须在这里**自己声明**：本模块的 parent 是 spring-boot-starter-parent，
+          Boot 3.5 的 BOM 把 ES 相关坐标管到了 8.x/9.x 线。
+          用 8.x 的客户端连 7.17 服务端不是"编译不过"，而是**运行期查询语法不被支持**
+          （8.x 的 knn 检索在 7.x 上不存在）—— 又是一个"能编译、炸在运行期"的坑。
+        -->
+        <elasticsearch.version>7.17.10</elasticsearch.version>
     </properties>
 
     <dependencyManagement>
@@ -102,6 +110,28 @@
                 <groupId>io.swagger.core.v3</groupId>
                 <artifactId>swagger-annotations-jakarta</artifactId>
                 <version>${swagger.version}</version>
+            </dependency>
+            <!--
+              ES 客户端：**必须在这里显式锁定版本**。
+              spring-boot-starter-parent 3.5.16 的 BOM 把 org.elasticsearch.client
+              管到了 8.x 线，而我们的服务端是 7.17.22。
+              子 pom 自己的 dependencyManagement **优先于**父链继承下来的条目，
+              所以这三行就是"把版本拽回 7.17"的唯一开关。
+            -->
+            <dependency>
+                <groupId>org.elasticsearch.client</groupId>
+                <artifactId>elasticsearch-rest-high-level-client</artifactId>
+                <version>${elasticsearch.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.elasticsearch.client</groupId>
+                <artifactId>elasticsearch-rest-client</artifactId>
+                <version>${elasticsearch.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.elasticsearch</groupId>
+                <artifactId>elasticsearch</artifactId>
+                <version>${elasticsearch.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -210,6 +240,44 @@
         </dependency>
 
         <!-- 本模块无定时任务 → 不引 xxl-job-core（知识库重建走管理端接口手动触发） -->
+
+        <!-- ==================== M6-3 RAG：向量检索底座 ==================== -->
+
+        <!--
+          Spring AI 的 VectorStore / SearchRequest / Filter DSL 定义在这里。
+          ⚠️ 它**不是** spring-ai-starter-model-openai 的传递依赖 ——
+          starter 只负责"模型通道"，向量抽象是独立模块，所以必须显式引。
+        -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-vector-store</artifactId>
+        </dependency>
+
+        <!--
+          ★ 这里**没有**用官方的 spring-ai-starter-vector-store-elasticsearch，原因很实在：
+          它的实现依赖 ES 8.x 的 **knn 检索**（`knn` 顶层查询），
+          而本项目的 ES 服务端是 7.17.22（fm-search 就在上面跑，动不了）。
+          7.17 只有 `script_score` + `cosineSimilarity` 这条路。
+          用官方 starter 的结果会是"依赖装上了、代码编译过了、一查就报 unknown field [knn]" ——
+          典型的运行期炸。
+          → 所以这里自己做 VectorStore 实现（见 ElasticsearchVectorStore），
+            用 7.17 的 RestHighLevelClient + script_score。
+            好消息是：实现的是 Spring AI 的**接口本身**，将来换 Milvus / pgvector
+            只需要换一个 Bean，上层（Advisor / Agent / 检索服务）一行都不用改。
+        -->
+        <dependency>
+            <groupId>org.elasticsearch.client</groupId>
+            <artifactId>elasticsearch-rest-high-level-client</artifactId>
+        </dependency>
+        <!-- 显式引 rest-client 与 es 内核：防止别的依赖把版本又拉回 8.x -->
+        <dependency>
+            <groupId>org.elasticsearch.client</groupId>
+            <artifactId>elasticsearch-rest-client</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.elasticsearch</groupId>
+            <artifactId>elasticsearch</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

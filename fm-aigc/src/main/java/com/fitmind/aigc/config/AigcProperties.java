@@ -18,6 +18,7 @@ public class AigcProperties {
     private Chat chat = new Chat();
     private Mock mock = new Mock();
     private Prompt prompt = new Prompt();
+    private Rag rag = new Rag();
 
     @Data
     public static class Chat {
@@ -164,6 +165,131 @@ public class AigcProperties {
              * （getConfig 走客户端本地缓存 + 服务端比对 MD5，不传内容）。</p>
              */
             private long refreshIntervalMs = 30_000L;
+        }
+    }
+
+    /**
+     * RAG（检索增强）配置。
+     *
+     * <p>★ 这些参数都是<b>会被人反复调</b>的：topK、相似度阈值、分块大小、
+     * 是否开混合检索。所以它们全部外置并且能被验收脚本读到 ——
+     * "改一行参数，2 分钟看出命中率涨了还是跌了"是这一节的核心目标。</p>
+     */
+    @Data
+    public static class Rag {
+
+        /**
+         * Embedding 通道：{@code bailian}（阿里百炼，真实语义向量）或
+         * {@code deterministic}（内置确定性向量，离线兜底）。
+         *
+         * <p>★ 为什么要有一个"假的"向量模型 —— 和 MockChatModel 完全同一个理由：
+         * <b>外部依赖不可控的东西，必须有一个能在无网环境跑起来的替身</b>。
+         * 它的价值不是"替代真模型"（哈希投影没有语义），而是
+         * "让链路在没网 / 没 key / 没额度时依然能被自动验收"。</p>
+         *
+         * <p>⚠️ 两套模型的向量**互不兼容**（一个 1024 维真实语义、一个哈希投影），
+         * 所以索引名会自动带上模型标识（见 {@link #indexName()}）——
+         * 混用会造成"能查到内容但相关性全错"，那是典型的静默降级。</p>
+         */
+        private String provider = "bailian";
+
+        /** 百炼的 OpenAI 兼容地址（embedding 与 chat 是两套不同的 base-url，必须分开配） */
+        private String baseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+
+        /**
+         * embedding 的 key。
+         *
+         * <p>⚠️ 默认值必须是**非空**的 {@code not-configured}：OpenAiApi 在构造时
+         * 断言 apiKey 非空，留空会让服务启动失败。一个"没配 key"的配置问题
+         * 不该升级成"服务起不来"，它应该表现为"检索降级为空"（见 EmbeddingConfig）。</p>
+         */
+        private String apiKey = "not-configured";
+
+        /** 百炼的 embedding 模型。text-embedding-v4 = Qwen3-Embedding 系列，支持自定义维度 */
+        private String model = "text-embedding-v4";
+
+        /**
+         * 向量维度。
+         *
+         * <p>★★ <b>维度是索引 schema 的一部分</b>：dense_vector 的 dims 是**不可变**的，
+         * 换模型 / 换维度 = 旧索引直接不可用，必须重建。
+         * 本项目把维度写进索引名，就是为了让"换了模型但没重建索引"这件事
+         * 在名字上就暴露出来，而不是变成"查询能跑但结果全错"。</p>
+         */
+        private int dimensions = 1024;
+
+        /** 索引名前缀。完整名 = {prefix}_{模型标识}_{维度}（见 {@link #indexName()}） */
+        private String indexPrefix = "fitmind_knowledge";
+
+        /** Elasticsearch 地址（9200 被 Cpolar 占用，本项目 ES 在 9201） */
+        private String esHost = "127.0.0.1";
+        private int esPort = 9201;
+
+        /**
+         * 检索返回条数。
+         *
+         * <p>★ 常见实现这里是 {@code topK(999)} + {@code query("")}，
+         * 等价于"把整个知识库塞进 prompt"。那样做的后果有三个：
+         * ① 每轮 token 费用与延迟被放大约 100 倍；② 真正相关的内容被淹在噪声里，
+         * 回答质量反而下降；③ prompt 迟早超长直接报错。
+         * 4 条是本项目语料规模下的合理值：够覆盖一个问题的依据，又不至于淹掉重点。</p>
+         */
+        private int topK = 4;
+
+        /**
+         * 相似度阈值：低于它的检索结果**不送进 prompt**。
+         *
+         * <p>★ 这是"宁可拒答，不要误导"的落点。没有阈值的话，
+         * 知识库里没有相关内容时模型仍会拿到 4 条"最不相关的内容"，
+         * 然后一本正经地基于它们编答案 —— 比直接说"不知道"危险得多。</p>
+         */
+        private double similarityThreshold = 0.55;
+
+        /**
+         * 是否开启"关键词 + 向量"混合检索。
+         *
+         * <p>★ 这是选 ES 而不是别的向量库时顺带拿到的好处：ES 同时是全文检索引擎。
+         * 纯向量检索在两种问题上会漏：① 精确术语（"臀桥"、"RPE" 这类词
+         * 用语义向量找反而不如字面匹配准）；② 数字与专有名词。
+         * 混合检索把两路召回用 RRF 融合，代价只是多一次查询。</p>
+         */
+        private boolean hybrid = true;
+
+        /** 关键词一路的召回条数（融合前） */
+        private int keywordTopK = 6;
+
+        /** 向量一路的召回条数（融合前，取大于 topK 再融合，避免融合后不够 topK 条） */
+        private int vectorTopK = 8;
+
+        /** 分块字符数上限（中文语料按字符切比按 token 切更贴合真实长度，见 MarkdownCorpusLoader） */
+        private int chunkSize = 600;
+
+        /** 相邻分块的重叠字符数：避免答案正好被切在分块边界上而检索不到 */
+        private int chunkOverlap = 120;
+
+        /** 送进 prompt 的检索内容字符上限（成本护栏：检索异常时不能把 prompt 打爆） */
+        private int maxContextChars = 4000;
+
+        /**
+         * 语料位置。
+         *
+         * <p>用 {@code classpath*:}（带星号）而不是 {@code classpath:}：
+         * 前者会扫描所有 classpath 条目，后者只匹配第一个 ——
+         * 打成 fat jar 之后语料在 {@code BOOT-INF/classes} 里，
+         * 两者行为差别会在"本地 IDE 跑得好好的、jar 一跑就找不到语料"时暴露出来。</p>
+         */
+        private String corpusLocation = "classpath*:knowledge/*.md";
+
+        /**
+         * 派生出来的索引名：{@code {prefix}_{模型标识}_{维度}}。
+         *
+         * <p>★ 刻意做成"算出来的"而不是"配出来的"：索引名与 embedding 模型
+         * 必须严格对应，而"两个配置项要保持一致"是个早晚会出错的约定
+         * （本项目已经踩过两次同类问题）。让它自动派生，人就没有写错的机会。</p>
+         */
+        public String indexName() {
+            String tag = (model == null ? "unknown" : model).replaceAll("[^a-zA-Z0-9]", "_").toLowerCase();
+            return indexPrefix + "_" + tag + "_" + dimensions;
         }
     }
 }

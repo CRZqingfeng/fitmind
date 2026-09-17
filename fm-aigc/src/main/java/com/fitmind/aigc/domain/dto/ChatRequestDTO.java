@@ -41,4 +41,52 @@ public class ChatRequestDTO {
      */
     @Schema(description = "编排策略（可选）：ROUTE / ENHANCE / SIMPLE")
     private String chatType;
+
+    /**
+     * 用户训练目标（可选），用于知识库检索的<b>元数据过滤</b>。
+     *
+     * <p>取值：{@code muscle_gain} / {@code fat_loss} / {@code strength} / {@code endurance} 等，
+     * 与语料 front-matter 里的 {@code goal} 字段对应。不传就不过滤。</p>
+     *
+     * <p>★ 为什么这个参数可以由请求指定（而 {@code userId} 绝对不行）：
+     * 它只影响<b>检索范围</b>，不参与任何鉴权判断 —— 就算有人传一个自己不匹配的目标，
+     * 最坏结果是"检索到的知识不贴合他的实际情况"，不会让他看到别人的数据。
+     * <b>判断一个参数能不能由客户端传，看的是"它能影响权限吗"。</b></p>
+     *
+     * <p>M6-4 起这个值会由 {@code BodyTools} 从体测档案里读出来（不再由前端传），
+     * 到时候保留参数的唯一原因是让验收脚本能精确构造"减脂用户 / 增肌用户"两种场景。</p>
+     */
+    @Schema(description = "训练目标（可选，用于知识库元数据过滤）：muscle_gain / fat_loss 等")
+    private String goal;
+
+    /**
+     * 检索返回条数覆盖（可选）。
+     *
+     * <p>★ 和 {@code chatType} 一样是"运维与验收用"的参数：调 RAG 效果的本质是
+     * <b>改一个参数、看命中率变了没有</b>。如果每次都改配置 + 重启才能试一次，
+     * 调参就退化成猜。有了它，"topK=1 和 topK=8 的命中率差多少"
+     * 可以在一次脚本里跑完。</p>
+     */
+    @Schema(description = "检索返回条数覆盖（可选），不传用配置默认值")
+    private Integer ragTopK;
+
+    /**
+     * 相似度阈值覆盖（可选），取值 0~1。
+     *
+     * <p>★ 验收里断言"阈值真的生效"靠的就是它：把阈值调到 0.99，
+     * 检索应该几乎全部落空（走到拒答）；调回默认值则恢复正常。
+     * 没有这个入口的话，"阈值配了但没生效"这类问题只能用肉眼看回答来猜。</p>
+     */
+    @Schema(description = "相似度阈值覆盖（可选，0~1），不传用配置默认值")
+    private Double ragThreshold;
+
+    /**
+     * 是否启用混合检索（关键词 + 向量）覆盖（可选）。
+     *
+     * <p>★ 它存在的唯一理由是<b>让"混合检索带来多少提升"变成一个可比较的数字</b>：
+     * 同一套评估集跑两次（开 / 关），命中率差值就是答案。
+     * 方案对比如果不能在同一个进程里跑，结论就只能靠嘴说。</p>
+     */
+    @Schema(description = "是否启用混合检索覆盖（可选），不传用配置默认值")
+    private Boolean ragHybrid;
 }

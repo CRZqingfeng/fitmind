@@ -29,6 +29,20 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 
+// ★ M6-3：固定问答评估集（检索命中率的唯一可比较依据）
+import { RAG_EVAL_SET, RAG_REFUSAL_SET } from './rag-eval-set.mjs';
+
+/**
+ * 检索命中率下限。
+ *
+ * ★ 为什么不设成 100%：评估集是"自建语料 + 自拟问题"，
+ *   总有几个问题在语义上和另一篇语料更近（比如"减脂期蛋白质"同时像 05 和 07）。
+ *   把阈值设成 100% 的结果是"每次都在调那几个边缘用例"，
+ *   而真正的目标（改一个参数看整体涨跌）反而看不出来。
+ *   75% 是一个"链路正常就一定过、坏了就一定不过"的位置。
+ */
+const RAG_EVAL_HIT_FLOOR = 0.75;
+
 const GATEWAY = 'http://localhost:10010';
 const MYSQL = 'C:\\Program Files\\MySQL\\MySQL Server 8.0\\bin\\mysql.exe';
 const COACH_USER_ID = 2;
@@ -383,8 +397,11 @@ async function main() {
   const stream = await sseChat(sq, token, null);
   check('SSE 响应头是 text/event-stream',
     stream.contentType.includes('text/event-stream'), `contentType=${stream.contentType}`);
-  check('事件类型只有 DATA / STOP（协议不引入多余类型）',
-    [...new Set(stream.events.map((e) => e.name))].every((n) => n === 'DATA' || n === 'STOP'),
+  // ⚠️ M6-3 起协议里真的会多出 PARAM（引用来源），所以断言从"只有 DATA/STOP"
+  //    改成"只允许这三种" —— 这条断言本身没变松，它防的一直是
+  //    "随手往流里塞第四种事件类型"（前端会不认识）。
+  check('事件类型只有 DATA / PARAM / STOP（协议不引入多余类型）',
+    [...new Set(stream.events.map((e) => e.name))].every((n) => ['DATA', 'PARAM', 'STOP'].includes(n)),
     `类型=${[...new Set(stream.events.map((e) => e.name))].join(',')}`);
   check('首个事件是 DATA', stream.events[0]?.name === 'DATA');
   check('末个事件是 STOP（显式结束，前端才能区分"回答完了"和"掉线了"）',
@@ -399,8 +416,12 @@ async function main() {
   check('★ 流式分片拼接 == 非流式完整回答（两条路径一份实现）',
     streamedAnswer === plainAnswer,
     `流式 ${streamedAnswer.length} 字 / 非流式 ${plainAnswer.length} 字`);
+  // ⚠️ 这里刻意**不**断言回答里含某个具体词：M6-3 起回答内容受检索结果影响
+  //    （检索不到就拒答），把内容写进断言会让"中文编码"这条用例被检索效果绑架。
+  //    只断言"有正常汉字、没有替换字符" —— 这才是它真正要防的问题。
   check('中文未乱码（UTF-8 端到端）',
-    streamedAnswer.includes('热量') && !streamedAnswer.includes('\uFFFD'));
+    /[\u4e00-\u9fa5]/.test(streamedAnswer) && !streamedAnswer.includes('\uFFFD'),
+    `回答前 30 字=${streamedAnswer.slice(0, 30)}`);
 
   const meta = stopMeta(stream.events);
   check('STOP 载荷带本轮指标（前端可显示耗时，非流式接口也靠它拿指标）',
@@ -619,8 +640,210 @@ async function main() {
     check('Nacos 提示词链路验证（连接 Nacos 失败）', false, String(e).slice(0, 120));
   }
 
-  // ==================== 11. 清理与自检 ====================
-  section('11. 清理与自检');
+  // ==================== 11. RAG 全链路（M6-3） ====================
+  section('11. ★ RAG：语料 → 分块 → 向量化 → 检索 → 引用溯源');
+
+  const adminToken = await staffLogin(ADMIN_PHONE);
+  check('管理员登录成功（知识库管理端需要管理员身份）', !!adminToken);
+
+  const kbRes = await call('GET', '/ais/admin/knowledge/status', { token: adminToken });
+  const kb = kbRes.json?.data;
+  check('知识库状态接口可用', !!kb, `status=${kbRes.status}`);
+  check('★ 知识库索引已建立且有向量', Number(kb?.vectorCount) > 0, `条数=${kb?.vectorCount}`);
+  check('★★ 索引维度与当前 embedding 配置一致（防"换了模型但没重建索引"这类静默降级）',
+    Number(kb?.mappedDimensions) === Number(kb?.configuredDimensions),
+    `索引=${kb?.mappedDimensions} 配置=${kb?.configuredDimensions}`);
+  check('索引名自带模型与维度标识（维度是索引 schema 的一部分）',
+    String(kb?.indexName || '').includes('embedding') && String(kb?.indexName || '').endsWith('1024'),
+    `indexName=${kb?.indexName}`);
+  check('★ 语料被真的分成了多块（不是"一篇一块"也不是"整库一块"）',
+    Number(kb?.chunkCount) > Number(kb?.corpusDocs),
+    `${kb?.corpusDocs} 篇 → ${kb?.chunkCount} 块`);
+
+  // 非管理员访问管理端：必须被拦
+  const forbidden = await call('GET', '/ais/admin/knowledge/status', { token });
+  check('★ 学员访问知识库管理端被拒（重建索引是运维级操作，不能人人可点）',
+    forbidden.status === 403 || forbidden.json?.code === 403,
+    `status=${forbidden.status} code=${forbidden.json?.code}`);
+
+  // ---- 一次真实的知识问答 ----
+  const ragQ = '增肌期每天该吃多少蛋白质';
+  const ragAns = (await call('POST', CHAT_API,
+    { body: { content: ragQ, chatType: 'ENHANCE' }, token })).json?.data;
+  const rag = ragAns?.rag || {};
+  check('★ 知识问答触发了检索（ragMode=rag）', ragAns?.ragMode === 'rag', `ragMode=${ragAns?.ragMode}`);
+  check('★ 检索命中并注入 prompt', Number(ragAns?.ragHits) > 0, `hits=${ragAns?.ragHits}`);
+  check('引用来源结构化返回（title / section / docId / score 齐全）',
+    Array.isArray(rag.sources) && rag.sources.length > 0
+      && rag.sources.every((s) => s.title && s.docId && s.score !== undefined),
+    JSON.stringify(rag.sources?.[0] || {}).slice(0, 140));
+  check('★★ 溯源指向正确的语料（问蛋白质 → 命中 protein-intake）',
+    (rag.sources || []).some((s) => s.docId === '05-protein-intake'),
+    `来源=${(rag.sources || []).map((s) => s.docId).join(',')}`);
+  check('溯源带章节定位（用户能自己核对到具体小节，而不是只知道某篇）',
+    (rag.sources || []).some((s) => String(s.section || '').length > 0),
+    `section=${rag.sources?.[0]?.section}`);
+  check('检索耗时被记录（改检索参数后能看出代价）',
+    Number(ragAns?.ragSearchMs) >= 0 && Number(ragAns?.ragSearchMs) < 10000,
+    `searchMs=${ragAns?.ragSearchMs}`);
+
+  // ★★ 直接证据：语料原文确实进了 prompt
+  const ragSnap = redis('LINDEX', MOCK_SNAPSHOT_KEY, '0') || '';
+  check('★★ 检索到的语料原文确实进了 prompt（快照含【参考资料】块）',
+    ragSnap.includes('【参考资料】'), `快照长度=${ragSnap.length}`);
+  check('★★ prompt 的资料块带上了语料标题与正文（模型看得到出处与依据）',
+    ragSnap.includes('蛋白质摄取') || ragSnap.includes('蛋白质摄入') || ragSnap.includes('每公斤体重'),
+    ragSnap.slice(Math.max(0, ragSnap.indexOf('【参考资料】')), Math.max(0, ragSnap.indexOf('【参考资料】')) + 100));
+  check('★ 资料块与提问在同一段（【参考资料】…【用户问题】结构正确）',
+    ragSnap.includes('【用户问题】') && ragSnap.includes(ragQ));
+  check('★ 资料内容拼在用户消息里、不写进 system 提示词（外部输入不该有系统级权威）',
+    ragSnap.indexOf('【参考资料】') > 0
+      && ragSnap.indexOf('【参考资料】') > ragSnap.indexOf('FitMind'),
+    'system 人设在前、资料块在后 → 说明资料没被塞进 system');
+
+  // ---- topK 真正生效（对比常见实现的 topK=999） ----
+  const top1 = (await call('POST', CHAT_API,
+    { body: { content: ragQ, chatType: 'ENHANCE', ragTopK: 1 }, token })).json?.data;
+  const top5 = (await call('POST', CHAT_API,
+    { body: { content: ragQ, chatType: 'ENHANCE', ragTopK: 5 }, token })).json?.data;
+  check('★★ topK 生效：topK=1 时最多只给 1 条（不是"把整库塞进 prompt"）',
+    Number(top1?.ragHits) <= 1, `topK=1 → hits=${top1?.ragHits}`);
+  check('topK=5 时给的更多且不超过 5 条',
+    Number(top5?.ragHits) > Number(top1?.ragHits) && Number(top5?.ragHits) <= 5,
+    `topK=1 → ${top1?.ragHits} 条；topK=5 → ${top5?.ragHits} 条`);
+  check('★ 注入内容长度有硬上限（成本护栏：分块参数被改大也不会把 prompt 打爆）',
+    Number(top5?.rag?.contextChars || 0) <= Number(kb?.maxContextChars || 4000),
+    `contextChars=${top5?.rag?.contextChars}`);
+
+  // ---- 相似度阈值真正生效 ----
+  const looseTh = (await call('POST', CHAT_API,
+    { body: { content: ragQ, chatType: 'ENHANCE', ragThreshold: 0.1 }, token })).json?.data;
+  const strictTh = (await call('POST', CHAT_API,
+    { body: { content: ragQ, chatType: 'ENHANCE', ragThreshold: 0.99 }, token })).json?.data;
+  check('★★ 相似度阈值生效：阈值 0.99 时几乎全部落空（宁可拒答，也不用不相关内容硬编）',
+    Number(strictTh?.ragHits) === 0, `阈值0.99 → hits=${strictTh?.ragHits}`);
+  check('阈值放宽到 0.1 时能命中（阈值不是"配了没生效"）',
+    Number(looseTh?.ragHits) > 0, `阈值0.1 → hits=${looseTh?.ragHits}`);
+
+  // ---- metadata 过滤（★ 方案里点名的断言） ----
+  const byGoal = async (goal) => (await call('POST', CHAT_API,
+    { body: { content: ragQ, chatType: 'ENHANCE', goal }, token })).json?.data;
+  const fatLossAns = await byGoal('fat_loss');
+  const muscleAns = await byGoal('muscle_gain');
+  const fatDocs = (fatLossAns?.rag?.sources || []).map((s) => s.docId);
+  const muscleDocs = (muscleAns?.rag?.sources || []).map((s) => s.docId);
+  check('★★ metadata 过滤：减脂用户检索不到"增肌专属"文档（这比调 topK 有效得多）',
+    fatLossAns?.ragMode === 'rag'
+      && !fatDocs.includes('05-protein-intake') && !fatDocs.includes('04-muscle-gain'),
+    `减脂目标命中=${fatDocs.join(',') || '无'}`);
+  check('同一问题在增肌目标下能命中增肌文档（过滤没有把该给的也一起挡掉）',
+    muscleDocs.includes('05-protein-intake'), `增肌目标命中=${muscleDocs.join(',') || '无'}`);
+  check('★ 两种目标下检索结果确实不同（过滤生效而非"看起来配了"）',
+    JSON.stringify(fatDocs) !== JSON.stringify(muscleDocs),
+    `减脂=${fatDocs.join(',')} / 增肌=${muscleDocs.join(',')}`);
+
+  // ---- 拒答 ----
+  const offTopic = '怎么修汽车发动机';
+  const refusal = (await call('POST', CHAT_API,
+    { body: { content: offTopic, chatType: 'ENHANCE' }, token })).json?.data;
+  check('★ 库外问题：检索命中 0 条', Number(refusal?.ragHits) === 0, `hits=${refusal?.ragHits}`);
+  check('★★ 拒答：明确说不知道，而不是硬编一段健身内容',
+    /知识库|不能|没法/.test(String(refusal?.content || '')),
+    `回答=${String(refusal?.content || '').slice(0, 60)}`);
+  const refusalSnap = redis('LINDEX', MOCK_SNAPSHOT_KEY, '0') || '';
+  check('★ 无资料时 prompt 里带"没有检索到"的说明（拒答是提示词约束出来的，不是碰运气）',
+    refusalSnap.includes('没有检索到任何相关的知识库资料'), refusalSnap.slice(0, 60));
+
+  // ---- 混合检索可关闭（用于量化"关键词召回带来多少提升"） ----
+  const vectorOnly = (await call('POST', CHAT_API,
+    { body: { content: '训练时留余次数 RIR 是什么意思', chatType: 'ENHANCE', ragHybrid: false }, token })).json?.data;
+  check('混合检索开关可用（能跑"向量 vs 混合"的对比实验）',
+    vectorOnly?.rag?.hybrid === false && Number(vectorOnly?.ragHits) > 0,
+    `hybrid=${vectorOnly?.rag?.hybrid} hits=${vectorOnly?.ragHits}`);
+
+  // ---- 流式：引用来源的 PARAM 事件 ----
+  const ragStream = await sseChat(ragQ, token);
+  const names = ragStream.events.map((e) => e.name).join('→');
+  const paramEvent = ragStream.events.find((e) => e.name === 'PARAM');
+  check('★★ 引用来源通过 PARAM 事件下发（结构化，不靠模型在正文里写"依据《XX》"）',
+    !!paramEvent && (JSON.parse(paramEvent.data).sources || []).length > 0,
+    paramEvent ? paramEvent.data.slice(0, 110) : `事件=${names}`);
+  const paramIdx = ragStream.events.findIndex((e) => e.name === 'PARAM');
+  const dataIdx = ragStream.events.findIndex((e) => e.name === 'DATA');
+  const stopIdx = ragStream.events.findIndex((e) => e.name === 'STOP');
+  check('★ 事件顺序：DATA（正文）→ PARAM（引用）→ STOP（结束）',
+    dataIdx < paramIdx && paramIdx < stopIdx, `序列=${names}`);
+
+  const refusalStream = await sseChat(offTopic, token);
+  check('★ 拒答时不下发 PARAM（没有依据就不该有"参考资料"卡片）',
+    !refusalStream.events.some((e) => e.name === 'PARAM'),
+    `事件=${refusalStream.events.map((e) => e.name).join(',')}`);
+
+  // ---- 引用来源落库（历史记录可重渲染） ----
+  const citedSession = ragStream.events.find((e) => e.name === 'STOP')
+    ? JSON.parse(ragStream.events.find((e) => e.name === 'STOP').data).sessionId : null;
+  const storedParams = sql(`SELECT params FROM fm_aigc.chat_message
+    WHERE session_id='${citedSession}' AND role='assistant' AND params IS NOT NULL LIMIT 1`);
+  check('★★ 引用来源落库（翻历史记录时"参考资料"卡片能重渲染）',
+    storedParams.includes('"rag"') && storedParams.includes('title'),
+    storedParams.slice(0, 110) || '（没有落库）');
+
+  // ---- 知识库重建（管理端手动触发） ----
+  const rebuild = await call('POST', '/ais/admin/knowledge/rebuild', { token: adminToken });
+  const rb = rebuild.json?.data;
+  check('★ 管理端可重建知识库索引', rebuild.json?.code === 200 && Number(rb?.chunkCount) > 0,
+    `chunks=${rb?.chunkCount} costMs=${rb?.costMs}`);
+  check('重建是确定性的：重建后块数与语料规模一致（id 由语料派生，重复重建不会越建越多）',
+    Number(rb?.chunkCount) === Number(kb?.chunkCount),
+    `重建前 ${kb?.chunkCount} → 重建后 ${rb?.chunkCount}`);
+  const afterRebuild = (await call('POST', CHAT_API,
+    { body: { content: ragQ, chatType: 'ENHANCE' }, token })).json?.data;
+  check('重建后立刻能检索到（写完有 refresh，不是"要等一会才可见"）',
+    Number(afterRebuild?.ragHits) > 0, `hits=${afterRebuild?.ragHits}`);
+
+  // ==================== 12. 检索评估集（M6-3） ====================
+  section('12. ★★ 检索评估集（把"调 RAG"从玄学变成工程）');
+
+  let evalHit = 0;
+  const evalMiss = [];
+  for (const item of RAG_EVAL_SET) {
+    const r = await call('POST', CHAT_API,
+      { body: { content: item.q, chatType: 'ENHANCE' }, token });
+    const docIds = (r.json?.data?.rag?.sources || []).map((s) => s.docId);
+    if (docIds.includes(item.expectDoc)) {
+      evalHit++;
+    } else {
+      evalMiss.push(`${item.q}（期望 ${item.expectDoc}，实际 ${docIds.join(',') || '无'}）`);
+    }
+  }
+  const evalRate = evalHit / RAG_EVAL_SET.length;
+  check(`★★ 固定问答集检索命中率 ≥ ${(RAG_EVAL_HIT_FLOOR * 100).toFixed(0)}%（${evalHit}/${RAG_EVAL_SET.length}）`,
+    evalRate >= RAG_EVAL_HIT_FLOOR,
+    evalMiss.length ? `未命中：${evalMiss.slice(0, 3).join(' / ')}` : '');
+
+  let refusalOk = 0;
+  for (const item of RAG_REFUSAL_SET) {
+    const r = await call('POST', CHAT_API,
+      { body: { content: item.q, chatType: 'ENHANCE' }, token });
+    if ((r.json?.data?.rag?.sources || []).length === 0) refusalOk++;
+  }
+  check(`★★ 领域外问题的拒答率 100%（${refusalOk}/${RAG_REFUSAL_SET.length}）`,
+    refusalOk === RAG_REFUSAL_SET.length, `拒答成功 ${refusalOk} 条`);
+
+  // ★ 同一套评估集、两种检索方式 → "混合检索带来多少提升"变成一个数字
+  let vectorHit = 0;
+  for (const item of RAG_EVAL_SET) {
+    const r = await call('POST', CHAT_API,
+      { body: { content: item.q, chatType: 'ENHANCE', ragHybrid: false }, token });
+    const docIds = (r.json?.data?.rag?.sources || []).map((s) => s.docId);
+    if (docIds.includes(item.expectDoc)) vectorHit++;
+  }
+  check('★★ 混合检索 vs 纯向量：可对比、可量化（同一进程内跑出来的数字，不是估计）',
+    vectorHit <= evalHit,
+    `纯向量 ${vectorHit}/${RAG_EVAL_SET.length} vs 混合 ${evalHit}/${RAG_EVAL_SET.length}`);
+
+  // ==================== 13. 清理与自检 ====================
+  section('13. 清理与自检');
   aiCleanup();
   const leftSession = sql(`SELECT COUNT(*) FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`);
   const leftMsg = sql(`SELECT COUNT(*) FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID}`);

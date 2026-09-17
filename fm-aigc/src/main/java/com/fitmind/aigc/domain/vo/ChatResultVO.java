@@ -4,6 +4,8 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 import lombok.experimental.Accessors;
 
+import java.util.Map;
+
 /**
  * 一轮对话的完整结果（非流式）。
  *
@@ -69,4 +71,29 @@ public class ChatResultVO {
      */
     @Schema(description = "是否降级（模型不可用时的兜底回答）")
     private Boolean degraded;
+
+    // ==================== RAG（M6-3） ====================
+
+    /**
+     * 引用来源（结构化）。
+     *
+     * <p>★ 它<b>不来自模型输出</b>，而是直接来自检索结果 ——
+     * 这一点很重要：如果靠模型自己说"依据是《XX》"，它可能漏、可能把标题写错，
+     * 而<b>错的引用比没有引用更糟</b>（用户会相信一个错误的出处）。
+     * 结构：{@code {mode, hybrid, candidateCount, injectedCount, searchMs, sources:[{title, section, score, preview}]}}</p>
+     */
+    @Schema(description = "检索引用来源与统计（结构化，非模型生成）")
+    private Map<String, Object> rag;
+
+    @Schema(description = "检索模式：rag / degraded / skipped / off")
+    private String ragMode;
+
+    @Schema(description = "实际注入 prompt 的依据条数")
+    private Integer ragHits;
+
+    @Schema(description = "检索候选条数（向量 + 关键词，融合前）")
+    private Integer ragCandidates;
+
+    @Schema(description = "检索耗时（毫秒）")
+    private Integer ragSearchMs;
 }

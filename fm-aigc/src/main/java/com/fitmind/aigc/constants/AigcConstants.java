@@ -57,6 +57,41 @@ public final class AigcConstants {
     /** prompt 快照保留条数 */
     public static final int MOCK_PROMPT_SNAPSHOT_LIMIT = 30;
 
+    // ==================== 知识库元数据字段（M6-3） ====================
+
+    /**
+     * ★ 这几个 key 同时出现在三处：语料 front-matter、ES 的 doc 字段、检索结果的溯源展示。
+     * 抽成常量是因为它们**跨 Java 与 md 文件**，而"md 里写 title、代码里读 name"
+     * 这种错位不会有任何编译期提示，只会表现为"检索结果没有标题"。
+     */
+    public static final String META_DOC_ID = "doc_id";
+    public static final String META_TITLE = "title";
+    public static final String META_SECTION = "section";
+    public static final String META_CHUNK_INDEX = "chunk_index";
+    /** 元数据过滤字段：训练目标（muscle_gain / fat_loss / ...） */
+    public static final String META_GOAL = "goal";
+    /** 元数据过滤字段：知识分类（training / nutrition / recovery / injury） */
+    public static final String META_CATEGORY = "category";
+
+    // ==================== RAG 提示词片段 ====================
+
+    /**
+     * 检索到资料时，注入到用户消息里的资料块起始标记。
+     *
+     * <p>★ 用一个显式的标记把资料与提问分开，有两个作用：
+     * ① 模型能清楚区分"这是资料"和"这是用户的问题"；
+     * ② <b>验收脚本可以据此断言"检索到的内容确实进了 prompt"</b> ——
+     *    这是直接证据，而"回答看起来很有道理"只是间接证据
+     *    （模型自己本来就可能知道这些知识）。</p>
+     */
+    public static final String RAG_CONTEXT_HEADER = "【参考资料】";
+    /** 检索为空时注入的说明 —— 模型据此拒答，而不是基于"最不相关的 4 条"硬编 */
+    public static final String RAG_EMPTY_NOTICE =
+            "（本轮没有检索到任何相关的知识库资料。请明确告诉用户知识库里没有这方面内容，"
+                    + "不要凭自己的记忆作答。）";
+    /** 资料块的结尾标记 */
+    public static final String RAG_CONTEXT_FOOTER = "【用户问题】";
+
     // ==================== 默认值 ====================
 
     /** 会话标题取自首轮提问的前 N 个字 */

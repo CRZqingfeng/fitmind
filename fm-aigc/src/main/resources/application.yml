@@ -37,8 +37,9 @@ spring:
           #    以 GET /models 返回的为准：deepseek-flash / deepseek-v4-pro
           model: ${AIGC_CHAT_MODEL:deepseek-flash}
           temperature: 0.7
-      # 暂时关掉：这一套 base-url/key 是给 chat 用的，用它去做 embedding 会 404。
-      # M6-3 会为百炼建一套独立的 embedding 配置。
+      # ⚠️ 必须保持 false：这里的一套 base-url/key 是给 chat 用的，
+      #    用它去调 embedding 会 404（DeepSeek 根本没有 embeddings 接口）。
+      #    M6-3 在 EmbeddingConfig 里为百炼单独建了一套（见下面 fm.ai.rag）。
       embedding:
         enabled: false
 
@@ -50,6 +51,11 @@ fm:
         # ★ 对话必须登录：用户上下文是工具鉴权的根（M6-4 的 BodyTools 要读
         #    "当前用户"的体测档案，userId 只从 UserContext 取，绝不由 LLM 提供）
         - /chat/**
+        # ★ 管理端（知识库重建）也要登录：先由 SDK 解析出用户，再由
+        #    AdminAuthInterceptor 判管理员。缺了这一条的话，
+        #    UserContext 拿不到 userId，拦截器会把管理员也挡在外面（401），
+        #    而症状是"管理员访问管理端接口竟然说未登录"——很难联想到是白名单问题
+        - /admin/**
       excludeLoginPaths:
         - /health
 
@@ -97,6 +103,42 @@ fm:
         #   而主动拉取只依赖 getConfig（已验证可用），可靠性高得多。
         #   30 秒对"改提示词"足够快，开销可忽略。设小一点调试更方便（比如 5000）。
         refresh-interval-ms: ${AIGC_PROMPT_REFRESH_MS:30000}
+
+    # ==================== RAG（M6-3） ====================
+    rag:
+      # bailian（阿里百炼，真实语义向量）| deterministic（内置确定性向量，离线兜底）
+      # ★ 与 provider=mock 是同一个思想：外部依赖必须有一个确定性替身，
+      #   否则"RAG 链路对不对"就只能靠人肉试、还依赖网络与额度。
+      provider: ${AIGC_RAG_PROVIDER:bailian}
+      # ⚠️ embedding 与 chat 是两家供应商、两套 base-url —— 这正是"走 OpenAI 兼容协议"
+      #    的价值：代码完全一样，只是换了地址和模型名
+      base-url: ${AIGC_EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+      # 非空兜底，理由同 chat 的 api-key（见上面那段注释）
+      api-key: ${DASHSCOPE_API_KEY:not-configured}
+      model: ${AIGC_EMBEDDING_MODEL:text-embedding-v4}
+      # ⚠️ 维度是索引 schema 的一部分，改它必须重建索引（索引名会自动带上维度）
+      dimensions: ${AIGC_EMBEDDING_DIMS:1024}
+      index-prefix: fitmind_knowledge
+      # ⚠️ ES 在 9201（9200 被 Cpolar 占用）
+      es-host: ${ES_HOST:127.0.0.1}
+      es-port: ${ES_PORT:9201}
+
+      # ---- 检索参数（这一组是"调 RAG 效果"时真正要动的东西） ----
+      # ★ 常见实现是 query("") + topK(999)，等于把整库塞进 prompt；这里是 4 条
+      top-k: ${AIGC_RAG_TOP_K:4}
+      # ★ 低于阈值的结果不送进 prompt —— 宁可拒答，不要基于不相关内容硬编
+      similarity-threshold: ${AIGC_RAG_THRESHOLD:0.55}
+      # ★ 关键词 + 向量混合检索（ES 同时是全文检索引擎，这是选它的额外收益）
+      hybrid: ${AIGC_RAG_HYBRID:true}
+      keyword-top-k: 6
+      # 向量一路先多召回一些，融合后裁到 top-k（否则融合完可能不够条数）
+      vector-top-k: 8
+
+      # 分块：中文按字符切比按 token 切更贴合真实长度
+      chunk-size: 600
+      chunk-overlap: 120
+      # 成本护栏：送进 prompt 的检索内容上限
+      max-context-chars: 4000
 
 ---
 spring:

@@ -67,6 +67,21 @@ public class MockChatModel implements ChatModel {
     /** 放慢分片速度（测打断：慢到用户有机会点"停止"） */
     public static final String CMD_SLOW = "[MOCK:SLOW]";
 
+    /**
+     * ★ 检索为空时 Mock 的"拒答"回答。
+     *
+     * <p>为什么 Mock 需要认识这件事：RAG 的"拒答"能力最终要靠模型说出口，
+     * 而 Mock 是确定性替身 —— 它必须<b>按 prompt 的形态</b>决定说什么，
+     * 否则"知识库里没有相关内容 → 应该说不知道"这条链路在验收里就是空的
+     * （Mock 永远会返回一段像样的健身内容，看起来一切正常）。</p>
+     *
+     * <p>判定依据是 prompt 里有没有"没有检索到"这段说明 ——
+     * 也就是 <b>Mock 在验证"我们的 prompt 组装对不对"，而不是在验证自己</b>。</p>
+     */
+    public static final String REFUSAL_ANSWER =
+            "这个问题不在我的知识库里，我不能凭空给你编一个答案。"
+                    + "如果你愿意，可以换个更具体的训练或营养问题问我。";
+
     private final AigcProperties props;
     private final StringRedisTemplate redis;
 
@@ -149,10 +164,28 @@ public class MockChatModel implements ChatModel {
             return new MockPlan(category, null, 0);
         }
 
+        // ★ RAG 拒答：知识库检索为空时，prompt 里会带一段"没有检索到资料"的说明。
+        //   一个行为端正的模型此时应该拒答而不是硬编 —— Mock 照着做，
+        //   于是"检索为空 → 拒答"这条链路在验收里**真的被执行到**。
+        //   （判定依据是我们的 prompt 组装，不是在验证 Mock 自己。）
+        if (containsAny(userText, "没有检索到任何相关的知识库资料")) {
+            log.info("[Mock通道] prompt 里带「无资料」说明 → 按拒答回答（模拟行为端正的模型）");
+            return new MockPlan(REFUSAL_ANSWER, null, props.getMock().getChunkDelayMs());
+        }
+
         int delay = userText.contains(CMD_SLOW)
                 ? props.getMock().getChunkDelayMs() * 10
                 : props.getMock().getChunkDelayMs();
         return new MockPlan(answer(userText, prompt), null, delay);
+    }
+
+    private boolean containsAny(String text, String... keys) {
+        for (String key : keys) {
+            if (text.contains(key)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -204,10 +237,13 @@ public class MockChatModel implements ChatModel {
     /**
      * 生成可预期的回答。
      *
-     * <p>★ 回答末尾固定带上 {@code （上下文 N 字）} —— 这是<b>验收 RAG 的抓手</b>：
-     * 脚本先断言"不带知识库时 N 很小"，再断言"接入检索后 N 明显变大"，
-     * 就能证明检索到的文档**真的进了 prompt**，而不是只被检索出来就丢了。
-     * （只看模型输出的措辞是证明不了这件事的。）</p>
+     * <p>★ 回答末尾固定带上 {@code （Mock 通道 · 上下文 N 字 · 资料 M 条）} ——
+     * 这是<b>验收 RAG 的两个抓手</b>：
+     * ① N 是"送进模型的 prompt 总长度"：脚本先断言"不带知识库时 N 很小"，
+     *    再断言"接入检索后 N 明显变大"，能证明检索到的文档真的进了 prompt，
+     *    而不是"只被检索出来就丢了"；
+     * ② M 是"资料条数"：从 prompt 里数出来的，证明资料块被正确拼装。
+     * （只看模型输出的措辞是证明不了这两件事的 —— 模型自己本来就可能知道这些知识。）</p>
      */
     private String answer(String userText, Prompt prompt) {
         String q = stripCommands(userText);
@@ -225,7 +261,29 @@ public class MockChatModel implements ChatModel {
         } else {
             core = "关于「" + q + "」：这是个好问题。";
         }
-        return core + "（Mock 通道 · 上下文 " + promptChars(prompt) + " 字）";
+        int docs = countRetrievedDocs(prompt);
+        String suffix = docs > 0
+                ? "（Mock 通道 · 上下文 " + promptChars(prompt) + " 字 · 资料 " + docs + " 条）"
+                : "（Mock 通道 · 上下文 " + promptChars(prompt) + " 字）";
+        return core + suffix;
+    }
+
+    /** 数 prompt 里有几个"参考资料"条目（行为等价于"模型看到了几份依据"） */
+    private int countRetrievedDocs(Prompt prompt) {
+        String all = prompt.getContents();
+        int count = 0;
+        int idx = all.indexOf(AigcConstants.RAG_CONTEXT_HEADER);
+        if (idx < 0) {
+            return 0;
+        }
+        int footer = all.indexOf(AigcConstants.RAG_CONTEXT_FOOTER, idx);
+        String block = footer > 0 ? all.substring(idx, footer) : all.substring(idx);
+        for (String line : block.split("\n")) {
+            if (line.trim().startsWith("[")) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private String buildToolAnswer(String userText) {

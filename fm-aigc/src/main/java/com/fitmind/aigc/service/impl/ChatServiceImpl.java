@@ -14,6 +14,7 @@ import com.fitmind.aigc.domain.vo.ChatResultVO;
 import com.fitmind.aigc.orchestration.ChatOrchestrator;
 import com.fitmind.aigc.orchestration.ChatType;
 import com.fitmind.aigc.orchestration.OrchestrationResult;
+import com.fitmind.aigc.rag.RagTrace;
 import com.fitmind.aigc.service.IChatService;
 import com.fitmind.aigc.service.IChatSessionService;
 import com.fitmind.common.utils.UserContext;
@@ -26,7 +27,9 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.SignalType;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -74,7 +77,11 @@ public class ChatServiceImpl implements IChatService {
                 .filter(ev -> StrUtil.isNotEmpty(ev.getData()))
                 .concatWith(Flux.defer(() -> {
                     commit(turn, false);
-                    return Flux.just(stopEvent(turn, false));
+                    // ★ 顺序有讲究：引用来源（PARAM）在正文之后、STOP 之前发。
+                    //   前端先渲染完回答、再挂上"参考资料"卡片，不会打断打字机；
+                    //   而 STOP 是"本轮结束"的信号，必须留在最后 ——
+                    //   前端收到 STOP 就关连接，放在它后面的事件会被丢掉
+                    return Flux.fromIterable(tailEvents(turn, false));
                 }))
                 .onErrorResume(e -> {
                     // ★ 降级不是"抛 500"，而是发一段可读的话 + 正常 STOP。
@@ -86,9 +93,11 @@ public class ChatServiceImpl implements IChatService {
                     turn.degraded = true;
                     turn.answer.append(AigcConstants.FALLBACK_MODEL_BUSY);
                     commit(turn, true);
-                    return Flux.just(
-                            ChatEventVO.data(AigcConstants.FALLBACK_MODEL_BUSY).setRequestId(turn.requestId),
-                            stopEvent(turn, true));
+                    // 降级路径也带上引用来源：检索可能已经成功了，
+                    // "回答没出来但依据是有的"这个信息对排查很有价值
+                    return Flux.fromIterable(tailEvents(turn, true))
+                            .startWith(ChatEventVO.data(AigcConstants.FALLBACK_MODEL_BUSY)
+                                    .setRequestId(turn.requestId));
                 })
                 .doFinally(signal -> {
                     // ★ 兜底落库：客户端断连时（用户关页面、点停止），上游会 cancel，
@@ -129,16 +138,26 @@ public class ChatServiceImpl implements IChatService {
 
         StringBuilder content = new StringBuilder();
         String metaJson = null;
+        String paramJson = null;
         for (ChatEventVO ev : events) {
             if (AigcConstants.EVENT_DATA.equals(ev.getType())) {
                 content.append(StrUtil.nullToEmpty(ev.getData()));
             } else if (AigcConstants.EVENT_STOP.equals(ev.getType())) {
                 metaJson = ev.getData();
+            } else if (AigcConstants.EVENT_PARAM.equals(ev.getType())) {
+                // ★ PARAM（引用来源）也在这里被消费 —— 非流式接口因此**天然带回**了
+                //   引用信息，而不是"流式有、非流式没有"。这就是"两个入口一份实现"的好处：
+                //   不用记得在两条路径上各加一次，也就不会漏（M4-3 的两个入口就是这么漂移的）。
+                paramJson = ev.getData();
             }
         }
         ChatResultVO vo = new ChatResultVO()
                 .setContent(content.toString())
                 .setProvider(props.getChat().getProvider());
+        if (StrUtil.isNotBlank(paramJson)) {
+            var param = JSONUtil.parseObj(paramJson);
+            vo.setRag(JSONUtil.toBean(param, Map.class));
+        }
         if (StrUtil.isNotBlank(metaJson)) {
             var meta = JSONUtil.parseObj(metaJson);
             vo.setSessionId(meta.getStr("sessionId"))
@@ -150,7 +169,12 @@ public class ChatServiceImpl implements IChatService {
                     .setPromptTokens(meta.getInt("promptTokens"))
                     .setCompletionTokens(meta.getInt("completionTokens"))
                     .setRoutePromptTokens(meta.getInt("routePromptTokens"))
-                    .setDegraded(meta.getBool("degraded", false));
+                    .setDegraded(meta.getBool("degraded", false))
+                    // ★ 检索指标也放进非流式返回：调用方（含验收脚本）不用去翻日志
+                    .setRagMode(meta.getStr("ragMode"))
+                    .setRagHits(meta.getInt("ragHits"))
+                    .setRagCandidates(meta.getInt("ragCandidates"))
+                    .setRagSearchMs(meta.getInt("ragSearchMs"));
         }
         return vo;
     }
@@ -168,6 +192,8 @@ public class ChatServiceImpl implements IChatService {
         ChatSession session = sessionService.getOrCreate(dto.getSessionId(), userId, dto.getContent());
         ChatTurn turn = new ChatTurn(session.getSessionId(), userId,
                 IdUtil.getSnowflakeNextIdStr(), dto.getContent());
+        turn.retrieval = new AgentContext.RetrievalOptions(
+                dto.getGoal(), dto.getRagTopK(), dto.getRagThreshold(), dto.getRagHybrid());
 
         // 提问与回答共用同一个 requestId —— 这是幂等兜底键的一半
         // （uk_request_role(request_id, role)），也是"停止当前这一轮"的定位依据
@@ -192,7 +218,8 @@ public class ChatServiceImpl implements IChatService {
      */
     private OrchestrationResult orchestrate(ChatType chatType, ChatTurn turn) {
         AgentContext context = new AgentContext(
-                turn.sessionId, turn.requestId, turn.userId, turn.question);
+                turn.sessionId, turn.requestId, turn.userId, turn.question,
+                turn.retrieval, turn.ragTrace);
         try {
             OrchestrationResult result = orchestrator.dispatch(chatType, context);
             turn.agentLabel = result.label();
@@ -254,16 +281,50 @@ public class ChatServiceImpl implements IChatService {
                     .setCompletionTokens(turn.totalCompletionTokens() == 0 ? null : turn.totalCompletionTokens())
                     .setFirstTokenMs(turn.firstTokenMs < 0 ? null : turn.firstTokenMs)
                     .setTotalMs((int) (System.currentTimeMillis() - turn.startMs));
+            // ★ 检索来源一并落库到 params（JSON 列）：
+            //   ① 前端翻历史记录时，卡片要能重渲染出"参考资料"；
+            //   ② 出了幻觉要能复盘 —— "当时到底给了模型哪几份依据"是第一个要确认的事，
+            //      只存回答的话这件事永远查不清
+            Map<String, Object> rag = turn.ragTrace.toMap();
+            if (!turn.ragTrace.getSources().isEmpty()) {
+                msg.setParams(Map.of("rag", rag));
+            }
             sessionService.saveMessage(msg);
             sessionService.touch(turn.sessionId, turn.userId, 1);
-            log.info("本轮对话完成：requestId={}, 编排={}, Agent={}, 首字 {}ms, 总耗时 {}ms, tokens={}/{}, 降级={}",
+            log.info("本轮对话完成：requestId={}, 编排={}, Agent={}, 首字 {}ms, 总耗时 {}ms, tokens={}/{}, "
+                            + "检索={}(命中 {} 条/候选 {} 条, {}ms), 降级={}",
                     turn.requestId, turn.chatType, turn.agentLabel, turn.firstTokenMs, msg.getTotalMs(),
-                    turn.promptTokens, turn.completionTokens, degraded);
+                    turn.promptTokens, turn.completionTokens,
+                    turn.ragTrace.getMode(), turn.ragTrace.getInjectedCount(),
+                    turn.ragTrace.getCandidateCount(), turn.ragTrace.getSearchMs(), degraded);
         } catch (Exception e) {
             // 落库失败不能影响用户已经看到的回答 —— 回答已经吐出去了，
             // 这里抛异常只会让前端收到一个错误，而内容其实是对的
             log.error("对话落库失败（回答已产出，不影响用户）：requestId={}", turn.requestId, e);
         }
+    }
+
+    /**
+     * 收尾事件序列：<b>[引用来源 PARAM?] + STOP</b>。
+     *
+     * <p>★ 引用来源走 <b>PARAM 事件</b>（结构化 JSON）而不是拼进回答正文，
+     * 原因是准确性：拼在正文里就得靠模型自己说"依据是《XX》"——
+     * 它可能漏、可能把标题写错。而<b>引用一旦不准，比没有引用更糟</b>
+     * （用户会相信一个错误的出处）。走 PARAM 的话，数据直接来自检索结果本身，
+     * 不经过模型的转述；前端也能把它渲染成可展开的"参考资料"卡片。</p>
+     *
+     * <p>没有检索到依据时不发 PARAM（而不是发一个空数组）：
+     * 前端据此可以区分"这轮没有依据"和"这轮依据为空"，
+     * 而且不会有"空卡片闪一下"的体验问题。</p>
+     */
+    private List<ChatEventVO> tailEvents(ChatTurn turn, boolean degraded) {
+        List<ChatEventVO> events = new ArrayList<>();
+        if (!turn.ragTrace.getSources().isEmpty()) {
+            events.add(ChatEventVO.param(JSONUtil.toJsonStr(turn.ragTrace.toMap()))
+                    .setRequestId(turn.requestId));
+        }
+        events.add(stopEvent(turn, degraded));
+        return events;
     }
 
     /**
@@ -294,6 +355,13 @@ public class ChatServiceImpl implements IChatService {
                         // 另给一份明细：ROUTE 策略下路由单独花了多少（对比三种策略时要看这个）
                         .set("routePromptTokens", turn.routePromptTokens)
                         .set("routeCompletionTokens", turn.routeCompletionTokens)
+                        // ★ 检索可观测：命中/候选/耗时。改检索参数之后，
+                        //   "命中数变了没有"是最直接的反馈（比盯着回答猜靠谱得多）
+                        .set("ragMode", turn.ragTrace.getMode())
+                        .set("ragHits", turn.ragTrace.getInjectedCount())
+                        .set("ragCandidates", turn.ragTrace.getCandidateCount())
+                        .set("ragSearchMs", turn.ragTrace.getSearchMs())
+                        .set("ragContextChars", turn.ragTrace.getContextChars())
                         .set("degraded", degraded)
                         .toString());
     }
@@ -307,10 +375,18 @@ public class ChatServiceImpl implements IChatService {
         private final long startMs = System.currentTimeMillis();
         private final StringBuilder answer = new StringBuilder();
         private final AtomicBoolean committed = new AtomicBoolean(false);
+        /** ★ 本轮检索轨迹：由 RAG Advisor 就地填充，收尾时用来发 PARAM、落库、记指标 */
+        private final RagTrace ragTrace = new RagTrace();
         private int firstTokenMs = -1;
         private Integer promptTokens;
         private Integer completionTokens;
         private volatile boolean degraded;
+        /**
+         * 检索参数覆盖（目标 / topK / 阈值），来自请求参数。
+         * ★ M6-4 起"目标"会改由 BodyTools 从体测档案提供；保留请求参数是为了让
+         *   验收与演示能精确构造"减脂用户 / 增肌用户"和不同 topK、不同阈值的场景。
+         */
+        private AgentContext.RetrievalOptions retrieval = AgentContext.RetrievalOptions.none();
         /** 本次使用的编排策略 */
         private ChatType chatType = ChatType.DEFAULT;
         /** 实际产出回答的 Agent 标签（SIMPLE 策略下是 simple） */
