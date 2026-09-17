@@ -24,6 +24,12 @@ spring:
 fm:
   auth:
     resource:
+      # ★ 管理端（后台）鉴权：/admin/** 要求管理员身份。
+      #   M6-7 起拦截器由 fm-auth-resource-sdk 统一提供（此前 5 个服务各有一份副本，
+      #   每份都要靠"记得写 .order(2)"才正确，已因此踩过一次坑）。
+      #   ⚠️ order 由 SDK 保证，业务服务不需要、也不应该再自己注册。
+      admin:
+        enabled: true
       # 开启登录拦截（与网关形成双重防护，直连服务端口时同样受保护）
       enable: true
       includeLoginPaths:

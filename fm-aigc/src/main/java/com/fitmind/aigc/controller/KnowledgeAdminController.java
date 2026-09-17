@@ -17,7 +17,7 @@ import java.util.Map;
 /**
  * 知识库管理端接口。
  *
- * <p>全部走 {@code /admin/**} 前缀，由 {@link com.fitmind.aigc.config.AdminAuthInterceptor}
+ * <p>全部走 {@code /admin/**} 前缀，由 {@link com.fitmind.auth.resource.interceptors.AdminAuthInterceptor}
  * 校验管理员身份（网关侧完整路径是 {@code /ais/admin/knowledge/**}）。</p>
  *
  * <p>★ 为什么重建必须是个"手动触发的管理端接口"而不是定时任务：

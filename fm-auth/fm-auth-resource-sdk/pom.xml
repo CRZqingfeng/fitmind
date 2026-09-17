@@ -19,6 +19,19 @@
             <artifactId>fm-auth-common</artifactId>
         </dependency>
 
+        <!--
+          可选：管理端鉴权拦截器需要 UserClient（查询用户类型）。
+          ★ 必须是 optional —— 本 SDK 的使用方自己都会引 fm-api（它们要用别的客户端），
+            这里只是为了让"这个类能编译"和"能注入到 UserClient"成立。
+            声明成 optional 就不会向下传递，避免 SDK 反过来决定使用方的依赖集。
+          （无循环风险：fm-api 只依赖 fm-common，不依赖任何 fm-auth-* 模块。）
+        -->
+        <dependency>
+            <groupId>com.fitmind</groupId>
+            <artifactId>fm-api</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <!-- 业务服务为 Servlet 技术栈 -->
         <dependency>
             <groupId>org.springframework</groupId>
