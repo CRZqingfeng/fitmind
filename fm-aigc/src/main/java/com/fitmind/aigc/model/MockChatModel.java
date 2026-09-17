@@ -84,6 +84,14 @@ public class MockChatModel implements ChatModel {
             "这个问题不在我的知识库里，我不能凭空给你编一个答案。"
                     + "如果你愿意，可以换个更具体的训练或营养问题问我。";
 
+    /**
+     * ★ 知识库不可用时的降级回答标记。
+     *
+     * <p>Mock 必须把"降级"演得和"拒答"明显不同 —— 否则验收里这两条路径
+     * 长得一模一样，"区分它们"这件事就没有被验证到。</p>
+     */
+    public static final String DEGRADED_KB_MARK = "（知识库这次没能查，以上是通用建议）";
+
     /** Mock 认识的全部工具名（兜底判定用，见 {@link #availableTools}） */
     private static final List<String> KNOWN_TOOLS = List.of(
             "queryMyBodyProfile", "searchCourses", "queryCourseDetail", "prePlaceOrder");
@@ -220,6 +228,15 @@ public class MockChatModel implements ChatModel {
             // 分类任务返回"干净的一个词"（不带上下文后缀）——
             // 真模型在这种 prompt 下也是只输出一个词的
             return new MockPlan(category, null, 0, List.of());
+        }
+
+        // ★ M6-6：知识库**不可用**（不是"没有内容"）→ 演"降级但仍回答"。
+        //   必须排在拒答判定之前，且判定用的关键字要与拒答文案严格不同 ——
+        //   两条路径的差异只有一句话，靠模糊匹配是测不出区分度的。
+        if (containsAny(userText, "没能检索知识库")) {
+            log.info("[Mock通道] prompt 里带「知识库不可用」说明 → 按降级回答（照常答 + 说明没查证）");
+            return new MockPlan(answer(userText, prompt) + DEGRADED_KB_MARK,
+                    null, props.getMock().getChunkDelayMs(), List.of());
         }
 
         // ★ RAG 拒答：知识库检索为空时，prompt 里会带一段"没有检索到资料"的说明。

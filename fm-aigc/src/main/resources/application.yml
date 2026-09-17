@@ -210,6 +210,16 @@ spring:
       password: ${REDIS_PASSWORD:123456}
       database: 0
 
+  # ==================== RabbitMQ（M6-6：把 AI 指标发给数据中心） ====================
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    # ⚠️ AMQP 端口是 15673（15672 是管理台）—— 5672 被 Windows 保留端口段盖住了，
+    #    与 Redis 16379 是同一个原因（见排障手册）
+    port: ${RABBITMQ_PORT:15673}
+    username: ${RABBITMQ_USER:}
+    password: ${RABBITMQ_PASSWORD:}
+    virtual-host: /
+
 mybatis-plus:
   global-config:
     banner: false

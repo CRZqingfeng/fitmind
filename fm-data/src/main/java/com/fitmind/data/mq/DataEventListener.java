@@ -1,6 +1,7 @@
 package com.fitmind.data.mq;
 
 import com.fitmind.common.constants.MqConstants;
+import com.fitmind.common.mq.message.AiChatMessage;
 import com.fitmind.common.mq.message.AssessmentCreatedMessage;
 import com.fitmind.common.mq.message.OrderPayMessage;
 import com.fitmind.common.mq.message.OrderRefundMessage;
@@ -189,6 +190,47 @@ public class DataEventListener {
                 IDataCollectService.MetricDelta.one(DataMetric.ASSESS_COUNT)));
     }
 
+    // ==================== AI 对话（M6-6） ====================
+
+    /**
+     * AI 对话完成事件。
+     *
+     * <p>★ 它是数据中心<b>第一条"指标型"事件</b>：体测 / 成交那些事件的 delta 都是 1，
+     * 而这条带的是 token 数、延迟毫秒这些<b>真正的量</b>。
+     * 采集端一行都不用改（{@code MetricDelta.of(metric, delta)} 本来就支持任意增量）——
+     * 这正是把采集做成通用入口的收益。</p>
+     *
+     * <p>⚠️ 本方法本身不会抛：{@code safe()} 包住 + 消费端不成死循环，
+     * 因为抛出去在没有死信队列时会无限重投（这个坑 M5 就踩过）。</p>
+     */
+    @RabbitListener(bindings = @QueueBinding(
+            value = @Queue(value = MqConstants.Queue.DATA_AI_CHAT_QUEUE, durable = "true"),
+            exchange = @Exchange(value = MqConstants.Exchange.AI_EXCHANGE, type = ExchangeTypes.TOPIC),
+            key = MqConstants.Key.AI_CHAT
+    ))
+    public void listenAiChat(AiChatMessage message) {
+        if (message == null || message.getRequestId() == null) {
+            log.warn("AI 对话消息体有误，忽略：{}", message);
+            return;
+        }
+        // ★ 用业务发生时间而不是消息到达时间：23:59:59 结束的对话不该被记到今天
+        LocalDate date = message.getTimestamp() == null
+                ? LocalDate.now()
+                : java.time.Instant.ofEpochMilli(message.getTimestamp())
+                        .atZone(java.time.ZoneId.systemDefault()).toLocalDate();
+        safe(() -> collectService.collect(DataEventType.AI_CHAT,
+                // ★ bizId 用 requestId：它已经是 fm-aigc 侧的幂等键，重复投递被同一把钥匙挡住
+                message.getRequestId(),
+                message.getUserId(), date,
+                IDataCollectService.MetricDelta.one(DataMetric.CHAT_COUNT),
+                IDataCollectService.MetricDelta.of(DataMetric.CHAT_TOKENS,
+                        num(message.getPromptTokens()) + num(message.getCompletionTokens())),
+                IDataCollectService.MetricDelta.of(DataMetric.CHAT_FIRST_MS_SUM,
+                        num(message.getFirstTokenMs())),
+                IDataCollectService.MetricDelta.of(DataMetric.CHAT_DEGRADED_COUNT,
+                        Boolean.TRUE.equals(message.getDegraded()) ? 1 : 0)));
+    }
+
     // ==================== 工具 ====================
     private void safe(Runnable task) {
         try {
@@ -198,6 +240,11 @@ public class DataEventListener {
             // 但记 error —— 漏统计必须能被发现。
             log.error("数据采集失败（本次统计丢失）：{}", e.getMessage(), e);
         }
+    }
+
+    /** null 安全的整数（缺字段按 0 算 —— 统计里"没这个数"和"这个数是 0"等价） */
+    private int num(Integer v) {
+        return v == null ? 0 : v;
     }
 
     /** yyyyMMdd → LocalDate；解析不了就退回今天（宁可归错一天，也不能丢掉这条统计） */

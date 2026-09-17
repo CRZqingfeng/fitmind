@@ -29,6 +29,15 @@ public class RagTrace {
     private String note;
 
     /**
+     * ★★ 本轮检索是"失败了"还是"查到了但没有相关内容"。
+     *
+     * <p>这两件事在数据上都是"0 条结果"，但对模型要说完全不同的话：
+     * 失败 → 照常回答并说明没能查证；为空 → 拒答。
+     * 所以必须在轨迹里把它区分出来，否则下游只能看到"空"这一个信号。</p>
+     */
+    private boolean failed;
+
+    /**
      * ★ 本轮是否已经检索过 + 检索结果缓存。
      *
      * <p><b>为什么需要它</b>：工具调用会让 Advisor 链被<b>多次穿过</b>
@@ -73,6 +82,16 @@ public class RagTrace {
     }
 
     /** 检索不可用（ES 挂了 / embedding 失败）时的降级记录：对话继续，但标明"本轮没有依据" */
+    /** 标记为"检索失败"（与"检索到空"区分开，见 {@link #failed}） */
+    public RagTrace markFailed(String reason) {
+        this.failed = true;
+        return degrade(reason);
+    }
+
+    public boolean isFailed() {
+        return failed;
+    }
+
     public RagTrace degrade(String reason) {
         this.sources = new ArrayList<>();
         this.mode = "degraded";

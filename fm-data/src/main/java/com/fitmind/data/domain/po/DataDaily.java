@@ -54,6 +54,14 @@ public class DataDaily implements Serializable {
     /** 体测次数 */
     private Integer assessCount;
 
+    // ==================== AI 对话（M6-6） ====================
+
+    private Integer chatCount;
+    private Long chatTokens;
+    /** 首字延迟合计（毫秒）—— 配合 chatCount 算平均值，见 DataMetric 的说明 */
+    private Long chatFirstMsSum;
+    private Integer chatDegradedCount;
+
     private LocalDateTime createTime;
 
     private LocalDateTime updateTime;

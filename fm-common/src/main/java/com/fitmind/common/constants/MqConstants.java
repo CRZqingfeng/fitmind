@@ -26,6 +26,14 @@ public interface MqConstants {
 
         /** 点赞相关（M3-3，fm-remark 生产、业务方消费） */
         String LIKE_EXCHANGE = "like.record.topic";
+        /**
+         * AI 模块的事件交换机（M6-6）。
+         *
+         * <p>★ 每个业务域一个 exchange（course / learning / exam / pay / ai），
+         * 而不是所有模块挤在一个：消费者绑定时意图一目了然，
+         * 以后做权限或配额隔离也有边界可依。</p>
+         */
+        String AI_EXCHANGE = "ai.topic";
     }
 
     /** 路由键 */
@@ -130,6 +138,16 @@ public interface MqConstants {
          * 消费侧必须自己做幂等（重复投递不能重复计数）。</p>
          */
         String ASSESSMENT_CREATED_KEY = "assessment.created";
+
+        // ==================== AI 对话（M6-6） ====================
+        /**
+         * 一轮 AI 对话完成（携带 token / 首字延迟 / 工具次数等指标）。
+         *
+         * <p>★ 与别的 key 不同，这条消息带的不是"一次行为"而是<b>一组量</b>
+         * （token 数、毫秒数），但消费端的处理方式完全一样：
+         * 去重 → 累加 → 定时汇总。<b>指标型事件不需要新的采集通道，只需要新的 key。</b></p>
+         */
+        String AI_CHAT = "ai.chat";
 
         // ==================== 点赞数变更（M3-3） ====================
 
@@ -262,6 +280,9 @@ public interface MqConstants {
         String DATA_PRACTICE_QUEUE = "data.practice.queue";
         /** 成交统计队列（routing key: order.pay） */
         String DATA_ORDER_PAY_QUEUE = "data.order.pay.queue";
+
+        /** 数据中心：AI 对话指标（M6-6）。★ 绑在 ai.chat 上，与其他消费者的队列互不影响 */
+        String DATA_AI_CHAT_QUEUE = "data.ai.chat.queue";
         /** 退款统计队列（routing key: order.refund） */
         String DATA_ORDER_REFUND_QUEUE = "data.order.refund.queue";
         /** 体测统计队列（routing key: assessment.created） */

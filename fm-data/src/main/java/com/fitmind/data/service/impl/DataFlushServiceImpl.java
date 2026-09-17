@@ -56,7 +56,13 @@ public class DataFlushServiceImpl implements IDataFlushService {
                 .setOrderAmount(longOf(values, DataMetric.ORDER_AMOUNT))
                 .setRefundCount(intOf(values, DataMetric.REFUND_COUNT))
                 .setRefundAmount(longOf(values, DataMetric.REFUND_AMOUNT))
-                .setAssessCount(intOf(values, DataMetric.ASSESS_COUNT));
+                .setAssessCount(intOf(values, DataMetric.ASSESS_COUNT))
+                // ★ M6-6：AI 指标。与前面几个完全同构 —— 采集侧加了新指标，
+                //   汇总侧只需要"多接一根线"，不需要新的表或新的任务。
+                .setChatCount(intOf(values, DataMetric.CHAT_COUNT))
+                .setChatTokens(longOf(values, DataMetric.CHAT_TOKENS))
+                .setChatFirstMsSum(longOf(values, DataMetric.CHAT_FIRST_MS_SUM))
+                .setChatDegradedCount(intOf(values, DataMetric.CHAT_DEGRADED_COUNT));
 
         if (insert) {
             // ★ 完全没有数据的一天不落库：否则"趋势图"会被一堆全 0 的行填满，
@@ -133,7 +139,11 @@ public class DataFlushServiceImpl implements IDataFlushService {
     private boolean isAllZero(DataDaily d) {
         return d.getSignInCount() == 0 && d.getLearnCount() == 0 && d.getPracticeCount() == 0
                 && d.getOrderCount() == 0 && d.getOrderAmount() == 0
-                && d.getRefundCount() == 0 && d.getRefundAmount() == 0 && d.getAssessCount() == 0;
+                && d.getRefundCount() == 0 && d.getRefundAmount() == 0 && d.getAssessCount() == 0
+                // ★ 漏了 AI 这几列的话，"今天只有 AI 数据"的日子会被当成"全 0"跳过 ——
+                //   而它在 AI 上线后是常态（每天都有人用 AI，但不是每天都有成交）
+                && d.getChatCount() == 0 && d.getChatTokens() == 0
+                && d.getChatFirstMsSum() == 0 && d.getChatDegradedCount() == 0;
     }
 
     private int intOf(Map<Object, Object> values, DataMetric metric) {

@@ -27,6 +27,14 @@ public enum DataEventType {
     ORDER_REFUND("order.refund", "退款"),
     /** 完成一次体测（生产方 fm-exam） */
     ASSESSMENT("assessment.created", "体测"),
+    /**
+     * AI 对话（M6-6）。
+     *
+     * <p>★ 它的 bizId 是 requestId —— 而 requestId 在 fm-aigc 那边就已经是
+     * 幂等键了（{@code uk_request_role}）。这里再用一次同一个 id，
+     * 于是"重复投递"与"重复落库"被同一把钥匙挡住。</p>
+     */
+    AI_CHAT("ai.chat", "AI 对话"),
     ;
 
     /** 对应的 MQ routing key（与 {@code MqConstants.Key} 保持一致，这里冗余一份便于排查） */

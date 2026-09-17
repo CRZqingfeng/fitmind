@@ -239,6 +239,15 @@
             <artifactId>jackson-databind</artifactId>
         </dependency>
 
+        <!-- ★ M6-6：AI 指标要发布给数据中心（M5），走 MQ 异步。
+             ⚠️ 必须**显式**引：fm-common 对 spring-rabbit 是 provided（不传递）——
+             这与 xxl-job-core 是同一个坑（"yml 里配了"不等于"依赖在"，
+             配了也不会生效、还不报错）。本项目已第 4 次遇到 provided 不传递。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+
         <!-- 本模块无定时任务 → 不引 xxl-job-core（知识库重建走管理端接口手动触发） -->
 
         <!-- ==================== M6-3 RAG：向量检索底座 ==================== -->

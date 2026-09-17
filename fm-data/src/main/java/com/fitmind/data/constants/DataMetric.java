@@ -29,6 +29,18 @@ public enum DataMetric {
     REFUND_AMOUNT("refund_amount"),
     /** 体测次数 */
     ASSESS_COUNT("assess_count"),
+    // ==================== AI 对话（M6-6） ====================
+    CHAT_COUNT("chat_count"),
+    /** token 合计（输入 + 输出）—— 它直接对应成本，是这一组里最重要的量 */
+    CHAT_TOKENS("chat_tokens"),
+    /**
+     * 首字延迟<b>合计</b>（毫秒）。
+     *
+     * <p>★ 存合计而不是平均值：汇总表是**增量累加**的（Redis 计数攒着、定时任务往上加），
+     * 而平均值不可加。存合计 + 轮数，平均在任何时候都能算出来；反过来算不回去。</p>
+     */
+    CHAT_FIRST_MS_SUM("chat_first_ms_sum"),
+    CHAT_DEGRADED_COUNT("chat_degraded_count"),
     ;
 
     private final String field;

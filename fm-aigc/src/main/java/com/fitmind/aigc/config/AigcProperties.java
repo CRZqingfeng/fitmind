@@ -22,6 +22,8 @@ public class AigcProperties {
     private Tool tool = new Tool();
     private Memory memory = new Memory();
     private Stop stop = new Stop();
+    private Limit limit = new Limit();
+    private Observe observe = new Observe();
 
     /**
      * 会话记忆配置。
@@ -108,6 +110,67 @@ public class AigcProperties {
              */
             private int timeoutMs = 15_000;
         }
+    }
+
+    /**
+     * 用户级限流配置（M6-6）。
+     *
+     * <p>★★ 两类限制<b>管的不是同一件事</b>，所以都要有：</p>
+     * <ul>
+     *   <li><b>每日额度</b>（轮数 / token）管<b>总量</b> —— 它对应成本，
+     *       是"这个用户今天最多花我多少钱"</li>
+     *   <li><b>并发数</b>管<b>瞬时压力</b> —— 只有额度的话，用户开几个标签页
+     *       同时提问就能瞬间打出十几个模型调用，每一个都"没超额度"，
+     *       但下游压力与成本都是真的</li>
+     * </ul>
+     *
+     * <p>★ 默认值刻意给得宽松（200 轮 / 20 万 token）：限流的目标是
+     * "挡住异常与滥用"，不是"日常用着用着就被挡住"。正常用户一天问不到 100 轮，
+     * 而 200 轮的额度已经能把一个人为成本兜住。</p>
+     */
+    @Data
+    public static class Limit {
+
+        private boolean enabled = true;
+
+        /** 每人每天最多几轮对话 */
+        private int dailyChats = 200;
+
+        /** 每人每天最多消耗多少 token（prompt + completion 合计） */
+        private int dailyTokens = 200_000;
+
+        /**
+         * 同一用户同时在生成的轮数上限。
+         *
+         * <p>超过就<b>拒绝并提示"上一条还在答"</b>，而不是排队：
+         * 排队会让用户以为卡住了（他看到的是一个转圈），
+         * 而提示"等我说完再问"是即时的、可理解的。</p>
+         */
+        private int maxConcurrent = 2;
+
+        /**
+         * 并发计数的 TTL（秒）。
+         *
+         * <p>★ 它是<b>兜底</b>：如果结算没跑到（进程被 kill、Redis 抖动），
+         * 并发计数会一直占着，用户就会被"自己还在生成"永久挡住。
+         * 有了 TTL，最坏情况是等几分钟自动释放 —— 这也是"计数用租约不用状态"。</p>
+         */
+        private int runningTtlSeconds = 180;
+    }
+
+    /**
+     * 可观测与上报配置（M6-6）。
+     */
+    @Data
+    public static class Observe {
+
+        /**
+         * 是否把每轮指标发给数据中心（M5）。
+         *
+         * <p>★ 开关的意义：验收要验证"指标真的到了数据中心"，所以默认开；
+         * 而压测时可以让它闭嘴（避免统计流量干扰压测结论）。</p>
+         */
+        private boolean publishEvent = true;
     }
 
     /**
@@ -379,6 +442,18 @@ public class AigcProperties {
 
         /** 向量一路的召回条数（融合前，取大于 topK 再融合，避免融合后不够 topK 条） */
         private int vectorTopK = 8;
+
+        /**
+         * 故障注入：开启后检索**必定失败**（降级路径的验收用）。
+         *
+         * <p>★★ 为什么一个"故意做坏功能"的开关值得留：<b>降级路径必须被真的跑过一遍，
+         * 否则第一次跑就是线上。</b>"ES 挂了会怎样"这件事，靠读代码是看不出来的
+         * （读得出"会 catch"，读不出"catch 之后用户看到的是什么"）。</p>
+         *
+         * <p>它只影响检索、只由管理端接口切换（需要管理员身份）、不对外暴露，
+         * 且不持久化（重启即恢复）。这与生产上的混沌工程是同一个思路。</p>
+         */
+        private boolean simulateFailure = false;
 
         /** 分块字符数上限（中文语料按字符切比按 token 切更贴合真实长度，见 MarkdownCorpusLoader） */
         private int chunkSize = 600;

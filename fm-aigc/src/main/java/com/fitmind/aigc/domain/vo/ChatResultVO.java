@@ -163,4 +163,19 @@ public class ChatResultVO {
      */
     @Schema(description = "本轮上下文压缩耗时（毫秒）")
     private Integer compressMs;
+
+    // ==================== 限流（M6-6） ====================
+
+    /**
+     * 本轮是否被限流拒绝。
+     *
+     * <p>★ 被限流时 {@code content} 是一段<b>说人话的助手消息</b>（不是 500、不是空），
+     * 前端可以像正常回答一样渲染它，只是标注一下"额度用完了"。</p>
+     */
+    @Schema(description = "本轮是否被限流拒绝")
+    private Boolean limited;
+
+    /** 限流原因：CHAT_LIMIT（今日轮数用完）/ TOKEN_LIMIT / CONCURRENCY（上一条还在生成） */
+    @Schema(description = "限流原因")
+    private String limitReason;
 }

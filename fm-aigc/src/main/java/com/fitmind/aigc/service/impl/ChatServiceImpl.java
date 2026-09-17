@@ -12,6 +12,9 @@ import com.fitmind.aigc.domain.po.ChatSession;
 import com.fitmind.aigc.domain.vo.ChatEventVO;
 import com.fitmind.aigc.domain.vo.ChatResultVO;
 import com.fitmind.aigc.interrupt.GenerationRegistry;
+import com.fitmind.aigc.limit.ChatQuotaLimiter;
+import com.fitmind.aigc.mq.AiChatPublisher;
+import com.fitmind.aigc.limit.QuotaResult;
 import com.fitmind.aigc.memory.CompressOutcome;
 import com.fitmind.aigc.memory.ConversationMemory;
 import com.fitmind.aigc.orchestration.ChatOrchestrator;
@@ -23,6 +26,7 @@ import com.fitmind.aigc.service.IChatService;
 import com.fitmind.aigc.service.IChatSessionService;
 import com.fitmind.aigc.tool.ToolTrace;
 import com.fitmind.api.dto.user.UserBodyProfileDTO;
+import com.fitmind.common.mq.message.AiChatMessage;
 import com.fitmind.common.utils.TokenContext;
 import com.fitmind.common.utils.UserContext;
 import lombok.RequiredArgsConstructor;
@@ -63,13 +67,38 @@ public class ChatServiceImpl implements IChatService {
     private final ConversationMemory memory;
     /** ★ 生成登记簿（M6-5）：分布式打断的标记，见 GenerationRegistry */
     private final GenerationRegistry generationRegistry;
+    /** ★ 用户级限流（M6-6）：先扣后用 + 失败退还，见 ChatQuotaLimiter */
+    private final ChatQuotaLimiter quotaLimiter;
+    /** ★ 指标上报（M6-6）：把本轮的 token / 延迟 / 降级发给数据中心（M5） */
+    private final AiChatPublisher aiChatPublisher;
 
     // ==================== 流式 ====================
 
     @Override
     public Flux<ChatEventVO> stream(ChatRequestDTO dto) {
         Long userId = UserContext.getUser();
-        ChatTurn turn = prepare(dto, userId);
+
+        // ★★ M6-6 限流：**在"取会话 + 落库提问"之前**做。
+        //   位置很关键 —— 被限流拒绝的请求不该在库里留下一条提问：
+        //   否则用户被限住时仍在刷自己的会话列表，而且列表里会出现一堆
+        //   "有提问、没回答"的记录（看起来像 AI 坏了，其实是额度用完了）。
+        QuotaResult quota = quotaLimiter.acquire(userId);
+        if (quota.limited()) {
+            log.info("★ 本轮被限流拒绝：userId={}, 原因={}, 今日 {}/{}",
+                    userId, quota.reason(), quota.usedToday(), quota.limit());
+            return limitedReply(quota);
+        }
+
+        ChatTurn turn;
+        try {
+            turn = prepare(dto, userId);
+        } catch (Exception e) {
+            // ★ 预扣制必须有这一步兜底："占了额度但这一轮其实没跑起来"时要退还。
+            //   不退还的话，一次会话创建失败就会永久吃掉一份并发额度 ——
+            //   而并发额度只有 2 份，泄漏两次就等于这个用户再也问不了了。
+            quotaLimiter.settle(userId, 0, true);
+            throw e;
+        }
 
         // 编排策略：请求参数优先（演示与验收用），否则取配置默认值
         ChatType chatType = ChatType.parse(
@@ -149,6 +178,13 @@ public class ChatServiceImpl implements IChatService {
                     //   ⚠️ 清理是"值相等才删"（Lua）：避免把同会话下一轮已经打上的
                     //   新标记误删（那会让新一轮的流莫名其妙自己停掉）。
                     generationRegistry.clear(turn.sessionId, turn.requestId);
+
+                    // ★ M6-6 配额结算：释放并发额度、累加本轮实际 token、降级则退还轮数。
+                    //   放在 doFinally 最外层（而不是 commit 里）——
+                    //   客户端取消、报错、正常结束都会走到这里，一次就覆盖全部出口。
+                    quotaLimiter.settle(turn.userId,
+                            turn.totalPromptTokens() + turn.totalCompletionTokens(),
+                            turn.degraded);
                 });
     }
 
@@ -228,9 +264,54 @@ public class ChatServiceImpl implements IChatService {
                     .setMemoryHistory(meta.getInt("memoryHistory"))
                     .setCompressed(meta.getBool("compressed", false))
                     .setCompressedCount(meta.getInt("compressedCount"))
-                    .setCompressMs(meta.getInt("compressMs"));
+                    .setCompressMs(meta.getInt("compressMs"))
+                    // ★ 限流：被限流时 content 已经是那段可读提示，这里只补一个标记，
+                    //   让调用方（含验收脚本）能确定"这是被限住了"而不是"模型答非所问"
+                    .setLimited(meta.getBool("limited", false))
+                    .setLimitReason(meta.getStr("limitReason"));
         }
         return vo;
+    }
+
+    // ==================== 限流（M6-6） ====================
+
+    /**
+     * 被限流时的回复。
+     *
+     * <p>★★ 与"模型降级"同一个模式：<b>限流是预期内的业务状态，不是错误</b>。
+     * 返回一条说人话的助手消息 + 正常 STOP，而不是 500。好处有两层：
+     * 前端不用为它写一套特殊的错误处理（正常渲染即可），
+     * 用户也能看懂"为什么没回答、什么时候能再用" ——
+     * 而"429 Too Many Requests"对用户来说是零信息量的。</p>
+     */
+    private Flux<ChatEventVO> limitedReply(QuotaResult quota) {
+        String message = AigcConstants.limitMessage(quota.reason(), quota.limit());
+        return Flux.just(
+                ChatEventVO.data(message),
+                ChatEventVO.stop().setData(JSONUtil.createObj()
+                        .set("limited", true)
+                        .set("limitReason", quota.reason())
+                        .set("quotaUsed", quota.usedToday())
+                        .set("quotaLimit", quota.limit())
+                        .set("quotaRemaining", quota.remaining())
+                        .set("firstTokenMs", 0)
+                        .set("totalMs", 0)
+                        .toString()));
+    }
+
+    @Override
+    public Map<String, Object> quota() {
+        ChatQuotaLimiter.QuotaView v = quotaLimiter.view(UserContext.getUser());
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("enabled", v.enabled());
+        map.put("usedChats", v.usedChats());
+        map.put("dailyChats", v.dailyChats());
+        map.put("remainingChats", Math.max(0, v.dailyChats() - v.usedChats()));
+        map.put("usedTokens", v.usedTokens());
+        map.put("dailyTokens", v.dailyTokens());
+        map.put("running", v.running());
+        map.put("maxConcurrent", v.maxConcurrent());
+        return map;
     }
 
     // ==================== 停止与上下文查看（M6-5） ====================
@@ -464,6 +545,12 @@ public class ChatServiceImpl implements IChatService {
             //   常见实现只有 ②，于是"给用户看的历史"和"给模型看的上下文"是同一份数据，
             //   两个需求互相牵制：想记得久就得留得多，留得多又让存储与列表失控。
             memory.record(turn.sessionId, AigcConstants.ROLE_ASSISTANT, turn.answer.toString());
+            // ★★ M6-6：把本轮指标发给数据中心（M5）。
+            //   位置在**落库之后**：这样"数据中心有的"与"我们库里有的"不会出现
+            //   "统计说有、明细查不到"的不一致（顺序反了就会）。
+            //   ⚠️ 它是异步的且永不抛异常（见 AiChatPublisher）——
+            //      统计不是用户要的东西，也不该让对话为它承担风险。
+            aiChatPublisher.publish(buildStatMessage(turn, msg));
             log.info("本轮对话完成：requestId={}, 编排={}, Agent={}, 首字 {}ms, 总耗时 {}ms, tokens={}/{}, "
                             + "检索={}(命中 {} 条/候选 {} 条, {}ms), 工具={} 次{}, 历史 {} 条{}, 降级={}",
                     turn.requestId, turn.chatType, turn.agentLabel, turn.firstTokenMs, msg.getTotalMs(),
@@ -480,6 +567,35 @@ public class ChatServiceImpl implements IChatService {
             // 这里抛异常只会让前端收到一个错误，而内容其实是对的
             log.error("对话落库失败（回答已产出，不影响用户）：requestId={}", turn.requestId, e);
         }
+    }
+
+    /**
+     * 组装给数据中心的指标消息（M6-6）。
+     *
+     * <p>★ <b>只带指标、不带正文</b>：数据中心要回答的是"这个平台每天在 AI 上花了多少、
+     * 快不快、稳不稳"，而对话正文留在 fm-aigc 自己的库里 ——
+     * 那既是产品数据也是隐私数据，两边不该混在一起。</p>
+     */
+    private AiChatMessage buildStatMessage(ChatTurn turn, ChatMessage msg) {
+        return new AiChatMessage()
+                .setRequestId(turn.requestId)
+                .setUserId(turn.userId)
+                .setSessionId(turn.sessionId)
+                .setAgentType(turn.agentLabel)
+                .setChatType(turn.chatType.name())
+                .setProvider(props.getChat().getProvider())
+                // token 用**本轮总量**（回答 + 编排动作）：数据中心关心的是成本，
+                // 而 ROUTE 策略下路由那一次调用也是真花的钱
+                .setPromptTokens(turn.totalPromptTokens())
+                .setCompletionTokens(turn.totalCompletionTokens())
+                .setFirstTokenMs(turn.firstTokenMs < 0 ? 0 : turn.firstTokenMs)
+                .setTotalMs(msg.getTotalMs())
+                .setToolCallCount(turn.toolTrace.getCallCount())
+                .setRagHits(turn.ragTrace.getInjectedCount())
+                .setHistoryMessages(turn.historySize)
+                .setDegraded(turn.degraded)
+                .setCompressed(turn.compress.compressed())
+                .setTimestamp(System.currentTimeMillis());
     }
 
     /**

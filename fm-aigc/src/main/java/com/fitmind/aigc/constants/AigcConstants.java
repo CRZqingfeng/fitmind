@@ -190,6 +190,63 @@ public final class AigcConstants {
     /** 会话列表默认页大小上限 */
     public static final int SESSION_PAGE_MAX_SIZE = 50;
 
+    // ==================== 限流与配额（M6-6） ====================
+
+    /** 配额计数 key 前缀：{@code aigc:quota:{yyyyMMdd}:{chat|running|token}:{userId}} */
+    public static final String QUOTA_KEY_PREFIX = "aigc:quota:";
+
+    /** 统计口径的日期格式（配额 key 与数据中心 statDate 都用它） */
+    public static final java.time.format.DateTimeFormatter DAY_FMT =
+            java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd");
+
+    /** 超过每日轮数 */
+    public static final String LIMIT_CHAT_MSG =
+            "今天的 AI 教练使用次数已经用完了（每天 %d 次）。明天再来找我吧，"
+                    + "也可以先翻翻前面的对话记录。";
+    /** 超过每日 token 额度 */
+    public static final String LIMIT_TOKEN_MSG =
+            "今天的 AI 对话额度已经用完了（这个额度是按 token 计的）。明天再来找我吧。";
+    /** 并发超限（上一条还在生成） */
+    public static final String LIMIT_CONCURRENCY_MSG =
+            "我还在回答你上一条问题，等我说完再问下一个好吗？";
+
+    /**
+     * 把限流原因翻译成一句人话。
+     *
+     * <p>★ 三种原因必须给三种不同的提示：它们对用户的含义完全不一样 ——
+     * "今天用完了"是无可挽回（等明天），"上一条还在答"是<b>等一下就好</b>。
+     * 把后者也说成"额度用完了"会让用户直接放弃，而其实 3 秒后就能继续。</p>
+     */
+    public static String limitMessage(String reason, int limit) {
+        if ("CHAT_LIMIT".equals(reason)) {
+            return String.format(LIMIT_CHAT_MSG, limit);
+        }
+        if ("TOKEN_LIMIT".equals(reason)) {
+            return LIMIT_TOKEN_MSG;
+        }
+        return LIMIT_CONCURRENCY_MSG;
+    }
+
+    // ==================== 知识库不可用（降级，M6-6） ====================
+
+    /**
+     * ★★ 知识库<b>暂时不可用</b>（检索失败）时注入的说明。
+     *
+     * <p>它与 {@link #RAG_EMPTY_NOTICE} 的区别是<b>语义级</b>的，不能混为一谈：</p>
+     * <ul>
+     *   <li>{@link #RAG_EMPTY_NOTICE}：查过了，知识库里确实没有 → <b>应当拒答</b></li>
+     *   <li>本常量：这次压根没查成（索引挂了 / ES 不通）→ <b>应当照常回答</b>，
+     *       但要说明"这次没能查证平台资料"</li>
+     * </ul>
+     *
+     * <p>混成一种的后果是双向的：把"不可用"当"没有内容"，AI 会在自己会的领域
+     * 也拒绝回答（用户觉得它突然变笨）；把"没有内容"当"不可用"，
+     * AI 会在没有依据时张口就来（更糟）。</p>
+     */
+    public static final String RAG_UNAVAILABLE_NOTICE =
+            "（本轮没能检索知识库 —— 这是检索本身出了故障，不是知识库里没有内容。"
+                    + "请基于通用健身常识正常回答，并在回答开头用一句话说明这次没能查证平台资料。）";
+
     // ==================== 降级文案 ====================
 
     /**

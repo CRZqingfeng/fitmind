@@ -112,6 +112,19 @@ function sqlRow(query) {
   return sql(query).replace(/\r?\n/g, ' | ');
 }
 
+/**
+ * 取一行里的若干列。
+ *
+ * ★★ 这里有一个踩过的坑：`mysql -N` 的**列分隔符是 tab（\t），不是 '|'**。
+ *   上面的 sqlRow() 只把"换行"换成 ' | '（那是为了把多行压成一行），
+ *   列与列之间依然是 tab —— 所以 `sqlRow(...).split('|')` 是拿不到列的
+ *   （会得到 undefined，而断言就变成"看起来数据不对"）。
+ *   本 helper 就是为"要按列比对"准备的。
+ */
+function sqlCells(query) {
+  return sql(query).split('\t').map((x) => x.trim());
+}
+
 function envGet(key) {
   const env = fs.readFileSync('docker/.env', 'utf8');
   return (env.match(new RegExp(`^${key}=(.*)$`, 'm')) || [])[1]?.trim();
@@ -686,6 +699,15 @@ async function main() {
   section('11. ★ RAG：语料 → 分块 → 向量化 → 检索 → 引用溯源');
 
   const adminToken = await staffLogin(ADMIN_PHONE);
+  // ★★ M6-6 前置：把学员的 AI 额度临时调大。
+  //   理由：这个脚本一轮要跑一百多轮对话（光是检索评估集就有 57 轮），
+  //   而默认额度是"一天 200 轮"—— 余量不够，脚本会跑到一半被自己限住，
+  //   表现是"后半段全是限额提示"，而看起来像功能坏了。
+  //   （顺带这也验证了"调额度即时生效、不用改配置不用重启"。）
+  const grantQuota = await call('POST',
+    '/ais/admin/limit?dailyChats=999&dailyTokens=5000000&maxConcurrent=4', { token: adminToken });
+  check('★ 可以为长脚本临时调大额度（管理端调额即时生效，不用改配置、不用重启）',
+    grantQuota.status === 200, `status=${grantQuota.status}`);
   check('管理员登录成功（知识库管理端需要管理员身份）', !!adminToken);
 
   const kbRes = await call('GET', '/ais/admin/knowledge/status', { token: adminToken });
@@ -1248,8 +1270,195 @@ async function main() {
   check('★★ 别人的会话看不到上下文窗口（摘要里含用户的个人信息）',
     otherView.json?.code !== 200, `code=${otherView.json?.code} msg=${otherView.json?.msg}`);
 
-  // ==================== 15. 清理与自检 ====================
-  section('15. 清理与自检');
+  // ==================== 15. ★★ 工程化：限流 + 降级收口 + 指标进数据中心（M6-6） ====================
+  section('15. ★★ 工程化（限流 / 降级收口 / 指标进数据中心）');
+
+  const LIMIT_API = '/ais/admin/limit';
+  const QUOTA_API = '/ais/chat/quota';
+  const FAIL_MODE_API = '/ais/admin/knowledge/fail-mode';
+  const todayStr = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  })();
+  const DAILY_HASH = `data:daily:${todayStr}`;
+
+  /** 临时调额（管理端） */
+  const setLimit = async (chats, tokens, conc = 2) =>
+    (await call('POST', `${LIMIT_API}?dailyChats=${chats}&dailyTokens=${tokens}&maxConcurrent=${conc}`,
+      { token: adminToken })).status;
+  /** 清空当日计数（不必等第二天） */
+  const clearQuota = async () =>
+    (await call('DELETE', `${LIMIT_API}/counter?userId=${STUDENT_USER_ID}`, { token: adminToken })).status;
+  /** 恢复为配置额度 */
+  const resetLimit = async () => (await call('DELETE', LIMIT_API, { token: adminToken })).status;
+
+  // ---- ① 配额接口 ----
+  await resetLimit();
+  const quota0 = (await call('GET', QUOTA_API, { token })).json?.data;
+  check('★ 配额接口可用（前端能显示"今天还剩几次"，而不是等被拒才知道）',
+    !!quota0 && typeof quota0.remainingChats === 'number' && typeof quota0.usedChats === 'number'
+    && typeof quota0.running === 'number',
+    JSON.stringify(quota0));
+
+  // ---- ② 轮数限额：被拒 + 不调模型 + 不落库 ----
+  check('管理端可以临时调额（不改配置、不重启）', (await setLimit(3, 1000000, 2)) === 200);
+  check('可以清空当日计数（否则"验证被打满"这件事要等到第二天）', (await clearQuota()) === 200);
+
+  const snapsBeforeLimit = Number(redis('LLEN', MOCK_PROMPT_SNAPSHOT_KEY) || 0);
+  const msgsBeforeLimit = Number(sql(`SELECT COUNT(*) FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID}`));
+
+  let limitedTurn = null;
+  for (let i = 1; i <= 4; i++) {
+    const r = (await call('POST', CHAT_API,
+      { body: { content: `限额探测第 ${i} 问`, sessionId: `accept-m66-limit-${i}` }, token })).json?.data;
+    if (r?.limited) { limitedTurn = r; }
+  }
+  check('★★ 超过每日轮数后被拒绝（前 3 次正常、第 4 次拒绝）',
+    !!limitedTurn && limitedTurn.limitReason === 'CHAT_LIMIT',
+    `limited=${limitedTurn?.limited} reason=${limitedTurn?.limitReason}`);
+  check('★ 被拒时给的是"说人话"的提示（带具体次数），不是 429 / 500',
+    /每天 3 次/.test(limitedTurn?.content || ''), `内容=${String(limitedTurn?.content).slice(0, 60)}`);
+
+  const snapsAfterLimit = Number(redis('LLEN', MOCK_PROMPT_SNAPSHOT_KEY) || 0);
+  check('★★ 被限流的请求**没有调用模型**（prompt 快照不增 —— 限流的意义就是挡住成本）',
+    snapsAfterLimit === snapsBeforeLimit, `之前 ${snapsBeforeLimit} → 之后 ${snapsAfterLimit}`);
+  const msgsAfterLimit = Number(sql(`SELECT COUNT(*) FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID}`));
+  check('★ 被限流的请求**没有落库**（不在会话列表里留一堆"有提问没回答"的记录）',
+    msgsAfterLimit - msgsBeforeLimit === 6,
+    `新增 ${msgsAfterLimit - msgsBeforeLimit} 条（3 轮正常应新增 6 条）`);
+
+  // ---- ③ token 额度：另一条路径、另一种文案 ----
+  await setLimit(50, 50, 2);
+  await clearQuota();
+  await call('POST', CHAT_API, { body: { content: '增肌期每天吃多少蛋白质', sessionId: 'accept-m66-token-1' }, token });
+  const tokenTurn = (await call('POST', CHAT_API,
+    { body: { content: '再问一次', sessionId: 'accept-m66-token-2' }, token })).json?.data;
+  check('★★ token 额度用完是**另一条路径**（原因不同：按 token 计而不是按次数）',
+    tokenTurn?.limited === true && tokenTurn?.limitReason === 'TOKEN_LIMIT',
+    `reason=${tokenTurn?.limitReason}`);
+  check('★ token 超限的文案说的是"额度"而不是"次数"（三种原因的文案必须各不相同）',
+    /额度/.test(tokenTurn?.content || '') && !/每天 \d+ 次/.test(tokenTurn?.content || ''),
+    `内容=${String(tokenTurn?.content).slice(0, 50)}`);
+
+  // ---- ④ 并发限制：配额管总量，并发管瞬时压力 ----
+  await setLimit(50, 1000000, 1);
+  await clearQuota();
+  const concPending = call('POST', CHAT_API,
+    { body: { content: '[MOCK:SLOW]减脂期该怎么吃', sessionId: 'accept-m66-conc-1' }, token });
+  await sleep(1200);
+  const concSecond = (await call('POST', CHAT_API,
+    { body: { content: '同时再问一个', sessionId: 'accept-m66-conc-2' }, token })).json?.data;
+  check('★★ 同一用户并发提问被挡住（只有配额的话，开几个标签页就能瞬间打出十几个模型调用）',
+    concSecond?.limited === true && concSecond?.limitReason === 'CONCURRENCY',
+    `reason=${concSecond?.limitReason}`);
+  check('★★ 并发被挡的提示是"等一下就好"，不是"额度用完了"（后者会让人直接放弃）',
+    /还在回答/.test(concSecond?.content || '') && !/用完了/.test(concSecond?.content || ''),
+    `内容=${String(concSecond?.content).slice(0, 40)}`);
+  const concFirst = (await concPending).json?.data;
+  check('★ 并发限流没有误伤第一个请求（它正常完成）',
+    concFirst?.limited !== true && (concFirst?.content || '').length > 0,
+    `limited=${concFirst?.limited} 长度=${(concFirst?.content || '').length}`);
+
+  // ---- ⑤ 降级时退还额度 ----
+  await setLimit(50, 1000000, 2);
+  await clearQuota();
+  const quotaBeforeRefund = (await call('GET', QUOTA_API, { token })).json?.data;
+  await call('POST', CHAT_API,
+    { body: { content: '[MOCK:TIMEOUT]模拟模型不可用', sessionId: 'accept-m66-refund-1' }, token });
+  await sleep(400);
+  const quotaAfterRefund = (await call('GET', QUOTA_API, { token })).json?.data;
+  check('★★ 降级（模型不可用）时额度被退还 —— 用户没得到服务，不该扣他的额度',
+    Number(quotaAfterRefund?.usedChats) === Number(quotaBeforeRefund?.usedChats),
+    `降级前 ${quotaBeforeRefund?.usedChats} → 降级后 ${quotaAfterRefund?.usedChats}`);
+
+  // ---- ⑥ ★★ 降级收口：知识库"不可用" ≠ 知识库"没有内容" ----
+  await setLimit(999, 5000000, 4);
+  await clearQuota();
+
+  const kbNormal = (await call('POST', CHAT_API,
+    { body: { content: '增肌期每天吃多少蛋白质', sessionId: 'accept-m66-kb-1' }, token })).json?.data;
+  check('正常情况：检索有命中', Number(kbNormal?.ragHits) > 0, `ragHits=${kbNormal?.ragHits}`);
+
+  const kbEmpty = (await call('POST', CHAT_API,
+    { body: { content: '怎么给自行车换内胎', sessionId: 'accept-m66-kb-2' }, token })).json?.data;
+  check('★ 库外问题：检索为空 → 拒答（不凭记忆编）',
+    Number(kbEmpty?.ragHits) === 0 && /不在我的知识库/.test(kbEmpty?.content || ''),
+    `ragHits=${kbEmpty?.ragHits} 内容=${String(kbEmpty?.content).slice(0, 40)}`);
+
+  const failOn = await call('POST', `${FAIL_MODE_API}?enabled=true`, { token: adminToken });
+  check('★ 管理端可以注入知识库故障（降级路径不演练，第一次演练就是线上）',
+    failOn.status === 200 && failOn.json?.data?.simulateFailure === true,
+    `status=${failOn.status}`);
+
+  const kbBroken = (await call('POST', CHAT_API,
+    { body: { content: '增肌期每天吃多少蛋白质', sessionId: 'accept-m66-kb-3' }, token })).json?.data;
+  check('★★ 故障注入后检索命中 0 条（注入真的生效了）',
+    Number(kbBroken?.ragHits) === 0, `ragHits=${kbBroken?.ragHits}`);
+  check('★★ 但它**不是拒答** —— "检索失败"与"知识库里没有"是两件事（M6-6 修的语义问题）',
+    !/不在我的知识库/.test(kbBroken?.content || ''), `内容=${String(kbBroken?.content).slice(0, 50)}`);
+  check('★★ 而是照常回答 + 明确说明这次没能查证（两头都占：不装傻、也不假装有依据）',
+    (kbBroken?.content || '').length > 20 && /没能查/.test(kbBroken?.content || ''),
+    `内容结尾=${String(kbBroken?.content).slice(-30)}`);
+  check('★ STOP 里的检索模式标为 degraded（可观测：能从指标看出这轮降级了）',
+    kbBroken?.ragMode === 'degraded', `ragMode=${kbBroken?.ragMode}`);
+
+  await call('POST', `${FAIL_MODE_API}?enabled=false`, { token: adminToken });
+  const kbAfter = (await call('POST', CHAT_API,
+    { body: { content: '增肌期每天吃多少蛋白质', sessionId: 'accept-m66-kb-4' }, token })).json?.data;
+  check('★ 关闭注入后立即恢复（不重启、不改配置）', Number(kbAfter?.ragHits) > 0,
+    `ragHits=${kbAfter?.ragHits}`);
+
+  const failDenied = await call('POST', `${FAIL_MODE_API}?enabled=true`, { token });
+  check('★★ 故障注入需要管理员身份（学员 token 被拒 —— 生产上的破坏性开关不能人人可点）',
+    failDenied.json?.code !== 200, `code=${failDenied.json?.code} msg=${failDenied.json?.msg}`);
+
+  // ---- ⑦ ★★ 指标进数据中心（M5） ----
+  const statSid = `accept-m66-stat-${Date.now()}`;
+  await call('POST', CHAT_API, { body: { content: '增肌期每天吃多少蛋白质', sessionId: statSid }, token });
+  await call('POST', CHAT_API, { body: { content: '减脂期热量缺口开多大', sessionId: statSid }, token });
+
+  const dbAssistant = () => Number(sql(
+    `SELECT COUNT(*) FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID} AND role='assistant'`));
+  const centerCount = () => Number(redis('HGET', DAILY_HASH, 'chat_count') || 0);
+  const counted = await waitUntil(() => centerCount() >= dbAssistant(), 15000);
+  check('★★ 每轮对话的指标经 MQ 进入数据中心（chat_count 在累加）',
+    counted && centerCount() > 0, `数据中心=${centerCount()} 待对账=${dbAssistant()}`);
+  check('★★ 全量对账：数据中心收到的轮数 == 明细表里的助手消息条数（防"统计说有、明细查不到"）',
+    centerCount() === dbAssistant(), `数据中心=${centerCount()} 明细=${dbAssistant()}`);
+
+  const centerTokens = Number(redis('HGET', DAILY_HASH, 'chat_tokens') || 0);
+  const dbTokens = Number(sql(
+    `SELECT IFNULL(SUM(IFNULL(prompt_tokens,0)+IFNULL(completion_tokens,0)),0) FROM fm_aigc.chat_message
+     WHERE user_id=${STUDENT_USER_ID} AND role='assistant'`));
+  check('★★ token 合计也对得上账（token 直接对应成本，是这一组里最重要的量）',
+    centerTokens === dbTokens, `数据中心=${centerTokens} 明细=${dbTokens}`);
+  check('★ 首字延迟（AI 体验的核心指标）也进了数据中心',
+    Number(redis('HGET', DAILY_HASH, 'chat_first_ms_sum') || 0) > 0,
+    `chat_first_ms_sum=${redis('HGET', DAILY_HASH, 'chat_first_ms_sum')}`);
+  check('★ 降级次数被单独统计（AI 服务健康度，与"用了多少"是两个问题）',
+    Number(redis('HGET', DAILY_HASH, 'chat_degraded_count') || 0) >= 1,
+    `chat_degraded_count=${redis('HGET', DAILY_HASH, 'chat_degraded_count')}`);
+
+  // ---- ⑧ 日汇总：Redis 计数 → data_daily ----
+  const flushRes = await call('POST', `/ds/admin/data/flush?date=${todayStr}`, { token: adminToken });
+  check('★ 手动触发日汇总成功（数据中心的定时任务就是调它）', flushRes.status === 200,
+    `status=${flushRes.status} data=${flushRes.json?.data}`);
+  const cells = sqlCells(`SELECT chat_count, chat_tokens, chat_first_ms_sum, chat_degraded_count
+    FROM fm_data.data_daily WHERE stat_date=${todayStr}`);
+  const [dChat, dTokens, dFirst, dDegraded] = cells;
+  check('★★ data_daily 落库了 AI 指标（日汇总表上回答问题只需要一行，不用扫明细表）',
+    cells.length === 4 && Number(dChat) > 0, `row=${JSON.stringify(cells)}`);
+  check('★★ data_daily 的 chat_count 与数据中心计数一致', Number(dChat) === centerCount(),
+    `表=${dChat} Redis=${centerCount()}`);
+  check('★★ data_daily 的 token 与明细表合计一致（三层对账：MQ → Redis → 汇总表）',
+    Number(dTokens) === dbTokens, `表=${dTokens} 明细=${dbTokens}`);
+  check('★ 首字延迟在汇总表里存的是**合计**（存合计才能增量累加，平均值随时能算）',
+    Number(dFirst) > 0, `chat_first_ms_sum=${dFirst}`);
+  check('★ 降级次数也进了汇总表（与"降级轮次"这件事对得上账）',
+    Number(dDegraded) >= 1, `chat_degraded_count=${dDegraded}`);
+
+  // ==================== 16. 清理与自检 ====================
+  section('16. 清理与自检');
 
   // ★ M6-5：**必须在删 MySQL 之前**把 session_id 取出来 —— 会话记忆的 Redis key
   //   是按 session_id 命名的，会话删了就再也对不上号。
@@ -1305,6 +1514,26 @@ async function main() {
     `content=${leftContent} content_draft=${leftContentDraft}`);
   sqlSoft(`DELETE FROM fm_trade.trade_order_detail WHERE course_id=${m64Course?.courseId || 0}`);
   sqlSoft(`DELETE FROM fm_trade.trade_order WHERE id=${orderCard?.orderId || 0}`);
+  // ★ M6-6：把"限流"和"故障注入"恢复原状。
+  //   ⚠️ 这两样必须清 —— 它们都是**全局状态**：不恢复的话，
+  //   下一次运行会一上来就被限流、或者检索一直是坏的，
+  //   而症状（"脚本莫名其妙全红"）跟真正的原因（上一次没清理）隔得很远。
+  await call('DELETE', '/ais/admin/limit', { token: adminToken });
+  await call('DELETE', `/ais/admin/limit/counter?userId=${STUDENT_USER_ID}`, { token: adminToken });
+  await call('POST', '/ais/admin/knowledge/fail-mode?enabled=false', { token: adminToken });
+  redis('DEL', `data:daily:${todayStr}`);
+  // 今天的日汇总行是本脚本 flush 出来的测试数据（真实链路的定时任务是凌晨汇总**昨天**）
+  sqlSoft(`DELETE FROM fm_data.data_daily WHERE stat_date=${todayStr}`);
+  const limitLeft = (await call('GET', `/ais/admin/limit?userId=${STUDENT_USER_ID}`, { token: adminToken }))
+    .json?.data;
+  check('★ 限流额度已恢复、故障注入已关闭（不把"被限住"留给下一次运行）',
+    Number(limitLeft?.dailyChats) === 200, `dailyChats=${limitLeft?.dailyChats}`);
+  const failLeft = await call('POST', '/ais/admin/knowledge/fail-mode?enabled=false', { token: adminToken });
+  check('★ 检索已恢复正常（注入开关不残留）', failLeft.json?.data?.simulateFailure === false);
+  check('★ 测试用的当日指标已清理',
+    redis('EXISTS', `data:daily:${todayStr}`) === '0' || Number(redis('HGET', `data:daily:${todayStr}`, 'chat_count') || 0) === 0,
+    `chat_count=${redis('HGET', `data:daily:${todayStr}`, 'chat_count')}`);
+
   // ★ M6-5：清掉本脚本产生的会话记忆（本次登记的 + 库里该用户的全部会话）。
   //   记忆其实**有 7 天 TTL**，不清也不会永久残留 —— 但验收脚本的职责是
   //   "跑完回到跑之前的样子"，把"7 天后会自己消失"留给别人去理解是不负责任的。

@@ -113,7 +113,13 @@ public class KnowledgeRetrievalAdvisor implements BaseAdvisor {
     private Prompt augment(Prompt prompt, List<Document> docs, String question) {
         StringBuilder sb = new StringBuilder();
         if (docs.isEmpty()) {
-            sb.append(AigcConstants.RAG_EMPTY_NOTICE);
+            // ★★ 关键分流：**检索失败**和**检索到空**都是 0 条，但要说完全不同的话。
+            //   · 失败（ES 不通 / 索引挂了）→ 照常回答，只说"这次没能查证"
+            //   · 为空（查过了、确实没有）→ 拒答，不凭记忆编
+            //   混为一谈的后果是双向的：要么在会的地方装不会，要么在没有依据时张口就来。
+            sb.append(trace.isFailed()
+                    ? AigcConstants.RAG_UNAVAILABLE_NOTICE
+                    : AigcConstants.RAG_EMPTY_NOTICE);
         } else {
             sb.append(AigcConstants.RAG_CONTEXT_HEADER).append('\n');
             for (int i = 0; i < docs.size(); i++) {

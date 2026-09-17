@@ -41,6 +41,14 @@ public interface IChatService {
     String stop(String sessionId);
 
     /**
+     * 当前用户的今日配额（限流的观测口）。
+     *
+     * <p>★ 暴露它的目的有两个：前端能显示"今日还剩 N 次"（用户心里有数，
+     * 而不是突然被拒），排查时也能一眼看出"他被限住了没有"。</p>
+     */
+    java.util.Map<String, Object> quota();
+
+    /**
      * 某个会话的"上下文窗口体检报告"。
      *
      * <p>★ 排查多轮对话问题（"它怎么不记得刚才说的了"）的第一站：

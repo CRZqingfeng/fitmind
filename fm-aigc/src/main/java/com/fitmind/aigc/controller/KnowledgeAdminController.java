@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -33,6 +34,7 @@ import java.util.Map;
 public class KnowledgeAdminController {
 
     private final KnowledgeIndexManager indexManager;
+    private final com.fitmind.aigc.config.AigcProperties props;
 
     /**
      * 知识库状态。
@@ -57,6 +59,26 @@ public class KnowledgeAdminController {
         result.put("chunkCount", s.chunkCount());
         result.put("message", s.message());
         result.putAll(indexManager.corpusInfo());
+        return result;
+    }
+
+    /**
+     * 故障注入：让检索强制失败。
+     *
+     * <p>★★ 存在的唯一理由是<b>把降级路径也测一遍</b>。
+     * "知识库挂了会怎样"靠读代码看不出来 —— 读得出"会 catch"，
+     * 读不出"catch 之后用户看到的是拒答还是正常回答"。
+     * 而这一次区分（{@code failed} vs {@code empty}）恰恰是 M6-6 修的语义问题。
+     * 这也是生产上"混沌工程"的最小形态：<b>故障路径不演练，第一次演练就是线上。</b></p>
+     */
+    @Operation(summary = "故障注入：开关检索失败（验证降级路径，重启恢复）")
+    @PostMapping("/fail-mode")
+    public Map<String, Object> failMode(@RequestParam(defaultValue = "true") boolean enabled) {
+        props.getRag().setSimulateFailure(enabled);
+        log.warn("★ 知识库故障注入已{}：后续检索将{}", enabled ? "开启" : "关闭", enabled ? "强制失败" : "恢复正常");
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("simulateFailure", props.getRag().isSimulateFailure());
+        result.put("note", "只影响检索；重启后恢复配置值");
         return result;
     }
 

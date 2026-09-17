@@ -71,11 +71,19 @@ public class KnowledgeRetriever {
             trace.skip("提问为空，跳过检索");
             return List.of();
         }
+        if (rag.isSimulateFailure()) {
+            // ★ 故障注入：让"知识库不可用"这条降级路径能被真的跑一遍。
+            //   注意它走的是 markFailed（不是"为空"）—— 模型应当照常回答并说明没能查证，
+            //   而不是拒答。两者的区别见 AigcConstants.RAG_UNAVAILABLE_NOTICE。
+            trace.markFailed("故障注入：模拟知识库不可用");
+            log.warn("★ 故障注入已开启：本轮检索强制失败（用于验证降级路径）");
+            return List.of();
+        }
         KnowledgeIndexManager.KnowledgeStatus status = indexManager.status();
         if (!status.healthy()) {
             // ★ 检索不可用不是"报错"，而是"这一轮没有依据"：
             //   对话要继续，只是模型不能声称自己有依据
-            trace.degrade("知识库不可用：" + status.message());
+            trace.markFailed("知识库不可用：" + status.message());
             log.warn("知识库不可用，本轮退化为无依据回答：{}", status.message());
             return List.of();
         }
@@ -117,7 +125,7 @@ public class KnowledgeRetriever {
         } catch (Exception e) {
             // ★ 检索失败降级为"无知识的普通对话"，而不是让整轮对话 500。
             //   一个可选能力（检索）坏了，不该把主能力（对话）也带下去。
-            trace.degrade("检索失败：" + e.getMessage());
+            trace.markFailed("检索失败：" + e.getMessage());
             log.error("知识检索失败（本轮退化为无依据回答）：{}", e.getMessage(), e);
             return List.of();
         }

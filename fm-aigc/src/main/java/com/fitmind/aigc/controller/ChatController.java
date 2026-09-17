@@ -116,6 +116,18 @@ public class ChatController {
         return chatService.memoryView(sessionId);
     }
 
+    /**
+     * 我的今日配额。
+     *
+     * <p>★ "还能问几次"是个用户会关心的问题（尤其在被拒过一次之后）。
+     * 提前显示它，比让用户在提问时突然被挡住要好得多。</p>
+     */
+    @Operation(summary = "我的今日 AI 对话配额（剩余次数 / 已用 token / 正在生成）")
+    @GetMapping("/quota")
+    public Map<String, Object> quota() {
+        return chatService.quota();
+    }
+
     @Operation(summary = "我的会话列表")
     @GetMapping("/sessions")
     public PageDTO<ChatSessionVO> sessions(@RequestParam(defaultValue = "1") int pageNo,
