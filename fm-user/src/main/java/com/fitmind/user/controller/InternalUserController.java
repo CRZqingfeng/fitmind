@@ -93,6 +93,12 @@ public class InternalUserController {
                 .setTargetWeight(vo.getTargetWeight())
                 .setWeeklyFrequency(vo.getWeeklyFrequency())
                 .setTrainingLevel(vo.getTrainingLevel())
-                .setInjuryHistory(vo.getInjuryHistory());
+                .setInjuryHistory(vo.getInjuryHistory())
+                // ★ M6-4 补的三个字段：AI 教练用它们做"个性化"与"知识库元数据过滤"。
+                //   注意 bmi 是**服务端算好的**，直接给 AI 用 ——
+                //   让模型拿身高体重自己算，等于把一个确定性计算变成一次可能算错的生成。
+                .setGoalType(vo.getGoalType())
+                .setBmi(vo.getBmi())
+                .setBodyFatRate(vo.getBodyFatRate());
     }
 }

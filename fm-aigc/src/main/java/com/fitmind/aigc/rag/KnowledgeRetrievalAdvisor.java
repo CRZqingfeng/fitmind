@@ -69,7 +69,17 @@ public class KnowledgeRetrievalAdvisor implements BaseAdvisor {
         // ★ 这一步是**同步阻塞**的（要拿到检索结果才能组装 prompt），
         //   所以它会体现在首字延迟上 —— 与 ROUTE 的路由调用是同一类成本，
         //   验收里"接 RAG 之后首字延迟多了多少"就有据可查。
-        List<Document> docs = retriever.retrieve(question, options, trace);
+        //
+        // ⚠️ 且它**每轮只做一次**：工具调用会让 Advisor 链被多次穿过，
+        //   不缓存的话同一个问题会被检索 3~4 遍（浪费 embedding、覆盖溯源）。
+        //   问题没变 → 结果必然相同 → 缓存安全。
+        List<Document> docs;
+        if (trace.isRetrieved()) {
+            docs = trace.cachedDocs();
+        } else {
+            docs = retriever.retrieve(question, options, trace);
+            trace.cacheDocs(docs);
+        }
         Prompt augmented = augment(prompt, docs, question);
         return request.mutate().prompt(augmented).build();
     }

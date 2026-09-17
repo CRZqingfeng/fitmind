@@ -52,4 +52,30 @@ public class UserBodyProfileDTO implements Serializable {
 
     @Schema(description = "伤病史")
     private String injuryHistory;
+
+    // ==================== M6-4 新增（AI 教练用） ====================
+    // ★ 这三个字段是"用户档案 → AI 上下文"这条链路的输入。
+    //   加它们而不是在 AI 侧"猜"目标，理由很实在：
+    //   训练目标是**用户自己填的**（goal_type），而"靠目标体重 vs 当前体重推导"
+    //   会算错两种情况 —— 想同时增肌减脂的（目标体重=当前体重）、
+    //   以及没填目标体重的（直接推导不出来，退化成"通用"，个性化就丢了）。
+    //   ★ 数据在哪就以哪为准，不要在消费方做启发式替代。
+
+    /**
+     * 训练目标：1-增肌 2-减脂 3-塑形 4-保持。
+     *
+     * <p>★ 它是 RAG <b>元数据过滤</b>的依据：目标是减脂的用户，
+     * 检索时应该排除"增肌期怎么吃"这类文档 ——
+     * 这比调 topK 有效得多（topK 只能控制"给几条"，控制不了"给的对不对"）。</p>
+     */
+    @Schema(description = "训练目标：1-增肌 2-减脂 3-塑形 4-保持")
+    private Integer goalType;
+
+    /** BMI（后端算好的，AI 直接引用，不要自己拿身高体重再算一遍） */
+    @Schema(description = "BMI")
+    private java.math.BigDecimal bmi;
+
+    /** 体脂率（%） */
+    @Schema(description = "体脂率（%）")
+    private java.math.BigDecimal bodyFatRate;
 }

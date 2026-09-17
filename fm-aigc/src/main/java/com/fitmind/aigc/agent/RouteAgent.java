@@ -5,6 +5,7 @@ import com.fitmind.aigc.config.AigcProperties;
 import com.fitmind.aigc.prompt.PromptManager;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.stereotype.Component;
 
@@ -36,8 +37,9 @@ public class RouteAgent extends AbstractAgent {
 
     private final AigcProperties props;
 
-    public RouteAgent(ChatClient chatClient, PromptManager promptManager, AigcProperties props) {
-        super(chatClient, promptManager);
+    public RouteAgent(ChatClient chatClient, PromptManager promptManager, AigcProperties props,
+                          ToolCallingManager toolCallingManager) {
+        super(chatClient, promptManager, toolCallingManager);
         this.props = props;
     }
 

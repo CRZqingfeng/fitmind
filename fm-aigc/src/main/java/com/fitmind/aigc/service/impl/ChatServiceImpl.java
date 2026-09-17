@@ -15,8 +15,12 @@ import com.fitmind.aigc.orchestration.ChatOrchestrator;
 import com.fitmind.aigc.orchestration.ChatType;
 import com.fitmind.aigc.orchestration.OrchestrationResult;
 import com.fitmind.aigc.rag.RagTrace;
+import com.fitmind.aigc.service.BodyProfileService;
 import com.fitmind.aigc.service.IChatService;
 import com.fitmind.aigc.service.IChatSessionService;
+import com.fitmind.aigc.tool.ToolTrace;
+import com.fitmind.api.dto.user.UserBodyProfileDTO;
+import com.fitmind.common.utils.TokenContext;
 import com.fitmind.common.utils.UserContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,6 +32,7 @@ import reactor.core.publisher.SignalType;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -48,6 +53,8 @@ public class ChatServiceImpl implements IChatService {
     private final ChatOrchestrator orchestrator;
     private final IChatSessionService sessionService;
     private final AigcProperties props;
+    /** ★ 体测档案：编排层拉一次，RAG 元数据过滤与 BodyTools 共用同一份 */
+    private final BodyProfileService bodyProfileService;
 
     // ==================== 流式 ====================
 
@@ -155,8 +162,14 @@ public class ChatServiceImpl implements IChatService {
                 .setContent(content.toString())
                 .setProvider(props.getChat().getProvider());
         if (StrUtil.isNotBlank(paramJson)) {
+            // PARAM 的载荷是 {rag:{...}, cards:[...]} —— 两种结构化数据共用一个事件
             var param = JSONUtil.parseObj(paramJson);
-            vo.setRag(JSONUtil.toBean(param, Map.class));
+            if (param.containsKey("rag")) {
+                vo.setRag(JSONUtil.parseObj(param.get("rag")));
+            }
+            if (param.containsKey("cards")) {
+                vo.setCards(param.get("cards"));
+            }
         }
         if (StrUtil.isNotBlank(metaJson)) {
             var meta = JSONUtil.parseObj(metaJson);
@@ -174,7 +187,11 @@ public class ChatServiceImpl implements IChatService {
                     .setRagMode(meta.getStr("ragMode"))
                     .setRagHits(meta.getInt("ragHits"))
                     .setRagCandidates(meta.getInt("ragCandidates"))
-                    .setRagSearchMs(meta.getInt("ragSearchMs"));
+                    .setRagSearchMs(meta.getInt("ragSearchMs"))
+                    .setToolCallCount(meta.getInt("toolCallCount"))
+                    .setToolNames(meta.getJSONArray("toolNames") == null ? null
+                            : meta.getJSONArray("toolNames").toList(String.class))
+                    .setToolCalls(meta.getJSONObject("toolCalls"));
         }
         return vo;
     }
@@ -191,7 +208,8 @@ public class ChatServiceImpl implements IChatService {
     private ChatTurn prepare(ChatRequestDTO dto, Long userId) {
         ChatSession session = sessionService.getOrCreate(dto.getSessionId(), userId, dto.getContent());
         ChatTurn turn = new ChatTurn(session.getSessionId(), userId,
-                IdUtil.getSnowflakeNextIdStr(), dto.getContent());
+                IdUtil.getSnowflakeNextIdStr(), dto.getContent(),
+                props.getTool().getMaxCallsPerTurn());
         turn.retrieval = new AgentContext.RetrievalOptions(
                 dto.getGoal(), dto.getRagTopK(), dto.getRagThreshold(), dto.getRagHybrid());
 
@@ -217,9 +235,29 @@ public class ChatServiceImpl implements IChatService {
      * 交给降级链路去统一处理（用户看到的还是那句可读的降级文案，不是 500）。</p>
      */
     private OrchestrationResult orchestrate(ChatType chatType, ChatTurn turn) {
+        // ★★ M6-4：先拉一次体测档案，两个消费方共用
+        //   ① RAG 的元数据过滤要用"训练目标"（减脂用户不该拿到增肌文档）；
+        //   ② 模型要用档案说人话（"你体脂 15.5%、每周练 4 次"）。
+        //   ⚠️ 只拉一次是刻意的：各自去 Feign 会出现"过滤器用旧档案、模型看新档案"
+        //      这种极难发现的不一致。SIMPLE 策略不挂工具也不检索，直接跳过省一次调用。
+        UserBodyProfileDTO profile = chatType == ChatType.SIMPLE
+                ? null : bodyProfileService.load(turn.userId);
+        turn.bodyProfile = profile;
+
+        // ★ 训练目标的优先级：**请求显式指定 > 档案推导**
+        //   请求级参数是给验收/演示用的（要能构造"减脂用户"这种场景）；
+        //   真实用户走的是档案推导 —— 这也是"体测数据成为 AI 上下文"的兑现点。
+        String goal = StrUtil.isNotBlank(turn.retrieval.goal())
+                ? turn.retrieval.goal()
+                : bodyProfileService.deriveGoal(profile);
+        AgentContext.RetrievalOptions retrieval = new AgentContext.RetrievalOptions(
+                goal, turn.retrieval.topK(), turn.retrieval.threshold(), turn.retrieval.hybrid());
+
+        // ★ token 要在**请求线程上**取好带下去：工具会跑到 Reactor 的 boundedElastic 线程，
+        //   那里 ThreadLocal 里的身份是空的（见 ToolAuthContext 的说明）
         AgentContext context = new AgentContext(
                 turn.sessionId, turn.requestId, turn.userId, turn.question,
-                turn.retrieval, turn.ragTrace);
+                retrieval, turn.ragTrace, turn.toolTrace, profile, TokenContext.getToken());
         try {
             OrchestrationResult result = orchestrator.dispatch(chatType, context);
             turn.agentLabel = result.label();
@@ -285,18 +323,32 @@ public class ChatServiceImpl implements IChatService {
             //   ① 前端翻历史记录时，卡片要能重渲染出"参考资料"；
             //   ② 出了幻觉要能复盘 —— "当时到底给了模型哪几份依据"是第一个要确认的事，
             //      只存回答的话这件事永远查不清
-            Map<String, Object> rag = turn.ragTrace.toMap();
+            Map<String, Object> params = new LinkedHashMap<>();
             if (!turn.ragTrace.getSources().isEmpty()) {
-                msg.setParams(Map.of("rag", rag));
+                params.put("rag", turn.ragTrace.toMap());
+            }
+            if (!turn.toolTrace.getCards().isEmpty()) {
+                params.put("cards", turn.toolTrace.getCards());
+            }
+            if (!params.isEmpty()) {
+                msg.setParams(params);
+            }
+            // ★ 工具调用记录单独一列：它和"卡片数据"是两种东西 ——
+            //   卡片是给用户看的，调用记录是给排查用的（调了什么、参数是什么、成功没有）
+            if (props.getTool().isRecordInvocations() && !turn.toolTrace.isEmpty()) {
+                msg.setToolCalls(turn.toolTrace.toMap());
             }
             sessionService.saveMessage(msg);
             sessionService.touch(turn.sessionId, turn.userId, 1);
             log.info("本轮对话完成：requestId={}, 编排={}, Agent={}, 首字 {}ms, 总耗时 {}ms, tokens={}/{}, "
-                            + "检索={}(命中 {} 条/候选 {} 条, {}ms), 降级={}",
+                            + "检索={}(命中 {} 条/候选 {} 条, {}ms), 工具={} 次{}, 降级={}",
                     turn.requestId, turn.chatType, turn.agentLabel, turn.firstTokenMs, msg.getTotalMs(),
                     turn.promptTokens, turn.completionTokens,
                     turn.ragTrace.getMode(), turn.ragTrace.getInjectedCount(),
-                    turn.ragTrace.getCandidateCount(), turn.ragTrace.getSearchMs(), degraded);
+                    turn.ragTrace.getCandidateCount(), turn.ragTrace.getSearchMs(),
+                    turn.toolTrace.getCallCount(),
+                    turn.toolTrace.getCards().isEmpty() ? "" : "（返回 " + turn.toolTrace.getCards().size() + " 张卡片）",
+                    degraded);
         } catch (Exception e) {
             // 落库失败不能影响用户已经看到的回答 —— 回答已经吐出去了，
             // 这里抛异常只会让前端收到一个错误，而内容其实是对的
@@ -319,9 +371,18 @@ public class ChatServiceImpl implements IChatService {
      */
     private List<ChatEventVO> tailEvents(ChatTurn turn, boolean degraded) {
         List<ChatEventVO> events = new ArrayList<>();
+        // ★ 一个 PARAM 事件承载两种结构化载荷：rag（引用来源）+ cards（工具卡片）。
+        //   合成一个事件而不是发两个：前端只需要处理一次"卡片区渲染"，
+        //   而两个事件会让"先到的是哪个"变成一个需要约定的问题。
+        Map<String, Object> payload = new LinkedHashMap<>();
         if (!turn.ragTrace.getSources().isEmpty()) {
-            events.add(ChatEventVO.param(JSONUtil.toJsonStr(turn.ragTrace.toMap()))
-                    .setRequestId(turn.requestId));
+            payload.put("rag", turn.ragTrace.toMap());
+        }
+        if (!turn.toolTrace.getCards().isEmpty()) {
+            payload.put("cards", turn.toolTrace.getCards());
+        }
+        if (!payload.isEmpty()) {
+            events.add(ChatEventVO.param(JSONUtil.toJsonStr(payload)).setRequestId(turn.requestId));
         }
         events.add(stopEvent(turn, degraded));
         return events;
@@ -362,6 +423,13 @@ public class ChatServiceImpl implements IChatService {
                         .set("ragCandidates", turn.ragTrace.getCandidateCount())
                         .set("ragSearchMs", turn.ragTrace.getSearchMs())
                         .set("ragContextChars", turn.ragTrace.getContextChars())
+                        // ★ 工具可观测：调了几次、调了哪些。
+                        //   "AI 为什么答得慢/答得贵"经常就是工具被反复调
+                        .set("toolCallCount", turn.toolTrace.getCallCount())
+                        .set("toolNames", turn.toolTrace.toMap().get("toolNames"))
+                        // ★ 完整调用明细（名称/参数/结果摘要/耗时）：
+                        //   排查"AI 为什么答非所问"时第一件要看的就是它
+                        .set("toolCalls", turn.toolTrace.isEmpty() ? null : turn.toolTrace.toMap())
                         .set("degraded", degraded)
                         .toString());
     }
@@ -387,6 +455,10 @@ public class ChatServiceImpl implements IChatService {
          *   验收与演示能精确构造"减脂用户 / 增肌用户"和不同 topK、不同阈值的场景。
          */
         private AgentContext.RetrievalOptions retrieval = AgentContext.RetrievalOptions.none();
+        /** ★ 本轮工具调用轨迹（工具就地填充），收尾时发 PARAM、落 tool_calls */
+        private final ToolTrace toolTrace;
+        /** ★ 本轮拉取的体测档案（编排层拉、两个消费方共用） */
+        private UserBodyProfileDTO bodyProfile;
         /** 本次使用的编排策略 */
         private ChatType chatType = ChatType.DEFAULT;
         /** 实际产出回答的 Agent 标签（SIMPLE 策略下是 simple） */
@@ -405,11 +477,12 @@ public class ChatServiceImpl implements IChatService {
             return (completionTokens == null ? 0 : completionTokens) + routeCompletionTokens;
         }
 
-        private ChatTurn(String sessionId, Long userId, String requestId, String question) {
+        private ChatTurn(String sessionId, Long userId, String requestId, String question, int maxToolCalls) {
             this.sessionId = sessionId;
             this.userId = userId;
             this.requestId = requestId;
             this.question = question;
+            this.toolTrace = new ToolTrace(maxToolCalls);
         }
     }
 }

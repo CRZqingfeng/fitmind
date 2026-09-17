@@ -19,6 +19,7 @@ public class AigcProperties {
     private Mock mock = new Mock();
     private Prompt prompt = new Prompt();
     private Rag rag = new Rag();
+    private Tool tool = new Tool();
 
     @Data
     public static class Chat {
@@ -291,5 +292,27 @@ public class AigcProperties {
             String tag = (model == null ? "unknown" : model).replaceAll("[^a-zA-Z0-9]", "_").toLowerCase();
             return indexPrefix + "_" + tag + "_" + dimensions;
         }
+    }
+
+    /**
+     * 工具调用配置。
+     */
+    @Data
+    public static class Tool {
+
+        /**
+         * 单轮对话里允许的工具调用次数上限。
+         *
+         * <p>★ 这是<b>成本与体验的护栏</b>：模型有时会连续调工具
+         * （查一次不满意、换个关键词再查），没有上限时一轮对话能打十几次接口，
+         * 用户等半分钟还看不到一个字。</p>
+         *
+         * <p>超限时工具返回一句可读的提示（让模型基于已有信息作答），
+         * <b>而不是抛异常</b> —— 抛异常会直接把对话打断，用户看到的是"系统错误"。</p>
+         */
+        private int maxCallsPerTurn = 4;
+
+        /** 是否把工具调用记录落进 {@code chat_message.tool_calls}（复盘要看得见"调了什么"） */
+        private boolean recordInvocations = true;
     }
 }

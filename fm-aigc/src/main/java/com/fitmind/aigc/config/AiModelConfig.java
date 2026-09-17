@@ -71,6 +71,19 @@ public class AiModelConfig {
         // 记下真实用的是哪个实现 —— 排查"为什么回答怪怪的"时，
         // 第一件要确认的事就是"到底走的哪个通道"，日志里直接能给答案
         log.info("[AI 模型通道] ChatClient 就绪，底层 ChatModel = {}", chatModel.getClass().getSimpleName());
+
+        // ⚠️⚠️ M6-4 实测踩坑：**不能**把 ToolCallAdvisor 挂成 defaultAdvisors。
+        //
+        //   它的实现里有一句硬性断言：
+        //     IllegalArgumentException: ToolCall Advisor requires ToolCallingChatOptions
+        //                              to be set in the ChatClientRequest options.
+        //   而没有挂工具的请求（比如纯知识问答、SIMPLE 基线）**根本不会**构造
+        //   ToolCallingChatOptions —— 于是所有对话都会走进降级文案，
+        //   表现为"AI 突然整体不可用"，而根因是加了一个跟它们无关的 Advisor。
+        //
+        //   → 正确做法是"**挂了工具才挂工具循环**"，见 AbstractAgent.toolAdvisor()。
+        //     这也更符合语义：没有工具就没有循环可跑。
+        log.info("[AI 模型通道] ChatClient 就绪（工具循环由 AbstractAgent 在挂载工具时按需添加）");
         return ChatClient.builder(chatModel).build();
     }
 }

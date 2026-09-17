@@ -1,6 +1,8 @@
 package com.fitmind.aigc.agent;
 
 import com.fitmind.aigc.rag.RagTrace;
+import com.fitmind.aigc.tool.ToolTrace;
+import com.fitmind.api.dto.user.UserBodyProfileDTO;
 
 /**
  * 一次提问的上下文 —— Agent 回答问题所需要的全部输入。
@@ -18,13 +20,25 @@ import com.fitmind.aigc.rag.RagTrace;
  * @param ragTrace  ★ 本轮检索轨迹（引用溯源 / 落库 / 可观测）。由编排层创建，
  *                  RAG Advisor 就地填充 —— 用对象引用传递而不是往 context 的
  *                  Map 里塞，是为了让类型在编译期就被检查
+ * @param toolTrace ★ 本轮工具调用轨迹（调用记录 + 卡片参数），工具就地填充
+ * @param authToken ★ 本轮调用者的 token。
+ *                  <b>它存在是因为"工具不在 HTTP 请求线程上执行"</b> ——
+ *                  工具由 {@code ToolCallAdvisor} 调度到 Reactor 的 boundedElastic 线程，
+ *                  ThreadLocal 里的身份不会跟过去，所以要在请求线程上先取好、传下去。
+ *                  见 {@code ToolAuthContext}。
+ * @param bodyProfile ★ 本轮已拉取的用户健身档案。
+ *                  <b>编排层拉一次、两个消费方共用</b>（RAG 过滤 + BodyTools）——
+ *                  各自去 Feign 的话会出现"过滤器用旧档案、模型看新档案"这种
+ *                  极难发现的不一致
  */
 public record AgentContext(String sessionId, String requestId, Long userId, String question,
-                          RetrievalOptions retrieval, RagTrace ragTrace) {
+                          RetrievalOptions retrieval, RagTrace ragTrace,
+                          ToolTrace toolTrace, UserBodyProfileDTO bodyProfile, String authToken) {
 
     /** 不带任何覆盖参数时的便捷构造 */
     public AgentContext(String sessionId, String requestId, Long userId, String question) {
-        this(sessionId, requestId, userId, question, RetrievalOptions.none(), new RagTrace());
+        this(sessionId, requestId, userId, question, RetrievalOptions.none(), new RagTrace(),
+                new ToolTrace(4), null, null);
     }
 
     /**

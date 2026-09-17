@@ -6,6 +6,7 @@ import com.fitmind.aigc.agent.AgentContext;
 import com.fitmind.aigc.agent.AgentType;
 import com.fitmind.aigc.agent.RouteAgent;
 import com.fitmind.aigc.agent.RouteResult;
+import com.fitmind.aigc.constants.AigcConstants;
 import com.fitmind.aigc.prompt.PromptManager;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -133,7 +134,8 @@ public class ChatOrchestrator {
     private OrchestrationResult simple(AgentContext context) {
         String system = promptManager.get(PromptManager.SIMPLE_KEY);
         Flux<ChatResponse> responses = chatClient.prompt()
-                .system(s -> s.text(system).params(Map.of("now", DateUtil.now())))
+                .system(s -> s.text(system + AigcConstants.COMMON_GUARD)
+                        .params(Map.of("now", DateUtil.now())))
                 .user(context.question())
                 .stream()
                 .chatResponse();

@@ -1,13 +1,17 @@
 package com.fitmind.aigc.agent;
 
 import cn.hutool.core.date.DateUtil;
+import com.fitmind.aigc.constants.AigcConstants;
 import com.fitmind.aigc.prompt.PromptManager;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.ToolCallAdvisor;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.model.tool.ToolCallingManager;
 import reactor.core.publisher.Flux;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -21,12 +25,46 @@ import java.util.Map;
 @Slf4j
 public abstract class AbstractAgent implements Agent {
 
+    /**
+     * ★ 工具循环 Advisor 的执行顺序。
+     *
+     * <p>数字越大越靠内。这里刻意让它<b>比检索 Advisor 更靠内</b>（检索是 0）：
+     * 于是「检索 → 工具循环（可能跑好几轮）→ 组装回答」的语义是清晰的 ——
+     * 检索只发生一次，而"调工具再问模型"这件事在里层反复发生。
+     * 反过来的话，每一轮工具调用都会再触发一次检索，白花 embedding 的钱。</p>
+     */
+    protected static final int TOOL_ADVISOR_ORDER = 100;
+
     protected final ChatClient chatClient;
     protected final PromptManager promptManager;
 
-    protected AbstractAgent(ChatClient chatClient, PromptManager promptManager) {
+    /**
+     * 工具循环 Advisor。
+     *
+     * <p>★★ <b>为什么必须显式挂它</b>：工具循环（"模型返回 tool_call → 执行工具 →
+     * 把结果喂回模型 → 再问一轮"）的默认实现在 {@code ChatModel} 里面
+     * （{@code OpenAiChatModel} 有 internalCall/internalStream）。
+     * 而我们的 {@code MockChatModel} 是自己实现的 ChatModel —— <b>它不会执行工具</b>，
+     * 于是"Mock 通道下的工具调用"会表现成"模型说要调工具，然后就没有然后了"。</p>
+     *
+     * <p>{@code ToolCallAdvisor} 把这条循环提到了 ChatClient 的 Advisor 层，
+     * 对<b>任何</b> ChatModel 都生效 —— 这才让工具链路在 Mock 通道下也能被自动验收。
+     * （Spring AI 1.1 提供了它，但不会自动加：实测 {@code DefaultChatClient} 的字节码里
+     * 根本没有引用它。）</p>
+     *
+     * <p>⚠️ 它只在<b>挂了工具的 Agent</b> 上生效，不能做成全局默认 —— 见 {@code AiModelConfig}。</p>
+     */
+    private final ToolCallAdvisor toolAdvisor;
+
+    protected AbstractAgent(ChatClient chatClient, PromptManager promptManager,
+                            ToolCallingManager toolCallingManager) {
         this.chatClient = chatClient;
         this.promptManager = promptManager;
+        // 无状态、可复用：一个 Agent 实例建一个就够，不必每轮 new
+        this.toolAdvisor = ToolCallAdvisor.builder()
+                .toolCallingManager(toolCallingManager)
+                .advisorOrder(TOOL_ADVISOR_ORDER)
+                .build();
     }
 
     @Override
@@ -49,14 +87,20 @@ public abstract class AbstractAgent implements Agent {
         ChatClient.ChatClientRequestSpec spec = chatClient.prompt()
                 // system 里用 {now} 之类的占位符由 Spring AI 的模板引擎替换，
                 // 所以提示词里能写"今天是 {now}"这种需要实时信息的话
-                .system(s -> s.text(systemTemplate()).params(systemParams(context)))
+                // ★ 通用安全边界拼在每个 Agent 的 system 提示词末尾（只有一处定义，
+                //   不会出现"改了 4 个提示词漏了 1 个"——见 AigcConstants.COMMON_GUARD）
+                .system(s -> s.text(systemTemplate() + AigcConstants.COMMON_GUARD)
+                        .params(systemParams(context)))
                 .user(context.question());
 
         Object[] tools = tools(context);
+        List<Advisor> advisors = new ArrayList<>(advisors(context));
         if (tools.length > 0) {
             spec = spec.tools(tools);
+            // ★ 「挂了工具才挂工具循环」：没有工具的请求连 ToolCallingChatOptions
+            //   都不会构造，硬挂上去会直接抛 IllegalArgumentException（M6-4 实测）
+            advisors.add(toolAdvisor);
         }
-        List<Advisor> advisors = advisors(context);
         if (!advisors.isEmpty()) {
             spec = spec.advisors(advisors);
         }

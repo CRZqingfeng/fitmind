@@ -28,6 +28,33 @@ public class RagTrace {
     private String mode = "off";
     private String note;
 
+    /**
+     * ★ 本轮是否已经检索过 + 检索结果缓存。
+     *
+     * <p><b>为什么需要它</b>：工具调用会让 Advisor 链被<b>多次穿过</b>
+     * （每调一轮工具就重新走一遍链）。如果没有缓存，一次"查课程"的对话
+     * 会把同一个问题往 ES 里查 3~4 遍 —— 浪费 embedding 调用、拖慢响应，
+     * 而且后一次的检索结果会覆盖前一次的溯源信息（用户看到 4 条依据，
+     * 但回答其实基于第 1 次的）。</p>
+     *
+     * <p>同一个请求里，问题没变 → 检索结果必然相同 → 缓存是安全的。</p>
+     */
+    private volatile boolean retrieved;
+    private volatile List<org.springframework.ai.document.Document> cachedDocs = List.of();
+
+    public boolean isRetrieved() {
+        return retrieved;
+    }
+
+    public List<org.springframework.ai.document.Document> cachedDocs() {
+        return cachedDocs;
+    }
+
+    public void cacheDocs(List<org.springframework.ai.document.Document> docs) {
+        this.cachedDocs = docs == null ? List.of() : docs;
+        this.retrieved = true;
+    }
+
     /** 检索到的、真正进了 prompt 的一条依据 */
     public record Source(String docId, String title, String section, Double score, String preview) {
     }

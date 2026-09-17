@@ -1,7 +1,13 @@
 package com.fitmind.aigc.agent;
 
+import com.fitmind.aigc.client.SearchClient;
 import com.fitmind.aigc.prompt.PromptManager;
+import com.fitmind.aigc.service.BodyProfileService;
+import com.fitmind.aigc.tool.BodyTools;
+import com.fitmind.aigc.tool.CourseTools;
+import com.fitmind.api.client.course.CourseClient;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.stereotype.Component;
 
 /**
@@ -15,12 +21,36 @@ import org.springframework.stereotype.Component;
 @Component
 public class RecommendAgent extends AbstractAgent {
 
-    public RecommendAgent(ChatClient chatClient, PromptManager promptManager) {
-        super(chatClient, promptManager);
+    private final BodyProfileService bodyProfileService;
+    private final SearchClient searchClient;
+    private final CourseClient courseClient;
+
+    public RecommendAgent(ChatClient chatClient, PromptManager promptManager,
+                          BodyProfileService bodyProfileService,
+                          SearchClient searchClient, CourseClient courseClient,
+                          ToolCallingManager toolCallingManager) {
+        super(chatClient, promptManager, toolCallingManager);
+        this.bodyProfileService = bodyProfileService;
+        this.searchClient = searchClient;
+        this.courseClient = courseClient;
     }
 
     @Override
     public AgentType type() {
         return AgentType.RECOMMEND;
+    }
+
+    /**
+     * ★ 推荐 Agent 是工具最多、也最能体现"跨模块协同"的一个：
+     * 先读用户档案（M5 的体测数据）→ 再按目标搜课程（fm-search 的 ES 索引）→
+     * 最后由模型把两边拼成一句人话。
+     */
+    @Override
+    protected Object[] tools(AgentContext context) {
+        return new Object[]{
+                new BodyTools(bodyProfileService, context.bodyProfile(), context.toolTrace(), context.requestId()),
+                new CourseTools(searchClient, courseClient, context.toolTrace(), context.requestId(),
+                        context.userId(), context.authToken()),
+        };
     }
 }

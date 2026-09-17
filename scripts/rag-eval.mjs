@@ -95,7 +95,8 @@ async function runConfig(name, token, opts) {
   const miss = [];
   let hit = 0;
   for (const item of RAG_EVAL_SET) {
-    const r = await call('POST', '/ais/chat', { body: { ...body, content: item.q }, token });
+    // ★ 带上该问题对应的用户视角（goal）：检索是个性化的，不声明视角评估就不公平
+    const r = await call('POST', '/ais/chat', { body: { ...body, content: item.q, goal: item.goal }, token });
     const sources = r.json?.data?.rag?.sources || [];
     const docIds = sources.map((s) => s.docId);
     const ok = docIds.includes(item.expectDoc);

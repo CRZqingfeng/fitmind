@@ -96,4 +96,31 @@ public class ChatResultVO {
 
     @Schema(description = "检索耗时（毫秒）")
     private Integer ragSearchMs;
+
+    // ==================== Tool Calling（M6-4） ====================
+
+    /**
+     * 前端卡片数据（课程列表 / 待支付订单）。
+     *
+     * <p>★ 与 {@link #rag} 一样，它<b>不来自模型输出</b> —— 是工具执行时直接攒下来的原始数据。
+     * 靠模型"复述"课程价格和订单号，等于把展示数据的正确性交给一次生成，
+     * 而这类数字一旦错一个，用户就会照着错的去付款。</p>
+     */
+    @Schema(description = "工具产生的卡片数据（前端渲染用，非模型生成）")
+    private Object cards;
+
+    /**
+     * 工具调用记录。
+     *
+     * <p>★ 排查"AI 为什么答非所问"时，第一件要看的事就是<b>它到底调了什么工具、参数是什么</b>。
+     * 没有这个字段，就只能靠回答内容反推。</p>
+     */
+    @Schema(description = "工具调用记录（名称/参数/结果摘要/耗时）")
+    private Map<String, Object> toolCalls;
+
+    @Schema(description = "本轮调用的工具名列表")
+    private java.util.List<String> toolNames;
+
+    @Schema(description = "本轮工具调用次数")
+    private Integer toolCallCount;
 }

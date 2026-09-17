@@ -1,7 +1,11 @@
 package com.fitmind.aigc.agent;
 
+import com.fitmind.aigc.client.SearchClient;
 import com.fitmind.aigc.prompt.PromptManager;
+import com.fitmind.aigc.tool.CourseTools;
+import com.fitmind.api.client.course.CourseClient;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.stereotype.Component;
 
 /**
@@ -17,12 +21,35 @@ import org.springframework.stereotype.Component;
 @Component
 public class ConsultAgent extends AbstractAgent {
 
-    public ConsultAgent(ChatClient chatClient, PromptManager promptManager) {
-        super(chatClient, promptManager);
+    private final SearchClient searchClient;
+    private final CourseClient courseClient;
+
+    public ConsultAgent(ChatClient chatClient, PromptManager promptManager,
+                        SearchClient searchClient, CourseClient courseClient,
+                        ToolCallingManager toolCallingManager) {
+        super(chatClient, promptManager, toolCallingManager);
+        this.searchClient = searchClient;
+        this.courseClient = courseClient;
     }
 
     @Override
     public AgentType type() {
         return AgentType.CONSULT;
+    }
+
+    /**
+     * ★ 课程咨询走工具查<b>实时数据</b>，不走 RAG。
+     *
+     * <p>这是对常见实现的一处修正：它的 RAG 恰好挂在咨询/推荐上，
+     * 于是"这门课多少钱"会变成"从知识库里捞一段看起来相关的文字"——
+     * 而知识库里的价格是<b>过期快照</b>，用户会拿到一个自信但错误的答案。
+     * 该查库的查库，该查知识库的查知识库，两件事不能混。</p>
+     */
+    @Override
+    protected Object[] tools(AgentContext context) {
+        return new Object[]{
+                new CourseTools(searchClient, courseClient, context.toolTrace(), context.requestId(),
+                        context.userId(), context.authToken()),
+        };
     }
 }

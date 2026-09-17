@@ -4,6 +4,7 @@ import com.fitmind.aigc.prompt.PromptManager;
 import com.fitmind.aigc.rag.KnowledgeRetrievalAdvisor;
 import com.fitmind.aigc.rag.KnowledgeRetriever;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.stereotype.Component;
 
@@ -31,8 +32,9 @@ public class KnowledgeAgent extends AbstractAgent {
 
     private final KnowledgeRetriever retriever;
 
-    public KnowledgeAgent(ChatClient chatClient, PromptManager promptManager, KnowledgeRetriever retriever) {
-        super(chatClient, promptManager);
+    public KnowledgeAgent(ChatClient chatClient, PromptManager promptManager, KnowledgeRetriever retriever,
+                        ToolCallingManager toolCallingManager) {
+        super(chatClient, promptManager, toolCallingManager);
         this.retriever = retriever;
     }
 

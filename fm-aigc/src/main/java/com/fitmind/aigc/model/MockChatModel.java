@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
@@ -14,6 +15,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import reactor.core.publisher.Flux;
 
@@ -32,19 +34,19 @@ import java.util.concurrent.TimeoutException;
  * <p><b>它怎么解决这个问题</b>：实现 Spring AI 的 {@link ChatModel} 接口本身，
  * 于是上层代码用的还是标准的 {@code ChatClient}，**完全不知道自己在跟 Mock 说话**。
  * 这一点很关键 —— 如果 Mock 只是"绕过模型直接返回一段假数据"，
- * 那它验证不了 prompt 组装、Advisor 链、SSE 拼接这些真正容易出错的地方。</p>
+ * 那它验证不了 prompt 组装、Advisor 链、SSE 拼接、工具循环这些真正容易出错的地方。</p>
  *
- * <p><b>行为要足够真实（5 条，缺一条就测不出对应的问题）</b>：
+ * <p><b>行为要足够真实（6 条，缺一条就测不出对应的问题）</b>：
  * <ol>
  *   <li><b>按输入关键词返回可预期的回答</b> —— 断言才有依据</li>
  *   <li><b>真的分片流式输出</b> —— 否则 SSE 拼接、打字机、
  *       打断时"已生成部分落库"这些代码在验收里等于没跑</li>
- *   <li><b>能模拟工具调用</b>（M6-4）—— 验证 Tool Calling 链路</li>
- *   <li><b>能模拟超时 / 报错</b> —— 验证降级路径。★ 超时抛的是
- *       {@link TimeoutException}，与 Reactor 的 {@code timeout()} 抛的类型<b>相同</b>，
- *       所以"模型侧超时"和"我方超时"会走进同一个降级分支</li>
- *   <li><b>记录被调用的 prompt 全文</b> —— 用于断言"RAG 检索到的文档确实进了 prompt"。
- *       只看模型输出是验证不了这件事的</li>
+ *   <li><b>能识别"分类任务"并返回确定的类别</b> —— 否则多 Agent 路由永远走兜底</li>
+ *   <li><b>能识别"检索为空"并按拒答回答</b> —— 否则 RAG 的拒答链路是空的</li>
+ *   <li>★ <b>能发起工具调用、并在拿到工具结果后生成"基于真实数据"的回答</b> ——
+ *       否则 Tool Calling 链路在验收里等于没跑（而它恰恰是全链路里最长的一条）</li>
+ *   <li><b>能模拟超时 / 报错</b>，并<b>记录被调用的 prompt 全文</b> ——
+ *       前者验证降级，后者用于断言"检索到的文档确实进了 prompt"</li>
  * </ol>
  * </p>
  *
@@ -62,7 +64,7 @@ public class MockChatModel implements ChatModel {
     public static final String CMD_TIMEOUT = "[MOCK:TIMEOUT]";
     /** 模拟模型服务报错 */
     public static final String CMD_ERROR = "[MOCK:ERROR]";
-    /** 模拟工具调用（M6-4 用：先返回一次 tool_call，再由上层带着工具结果二次请求） */
+    /** 强制发起一次工具调用（不依赖关键词判定，用于精确控制） */
     public static final String CMD_TOOL = "[MOCK:TOOL]";
     /** 放慢分片速度（测打断：慢到用户有机会点"停止"） */
     public static final String CMD_SLOW = "[MOCK:SLOW]";
@@ -81,6 +83,18 @@ public class MockChatModel implements ChatModel {
     public static final String REFUSAL_ANSWER =
             "这个问题不在我的知识库里，我不能凭空给你编一个答案。"
                     + "如果你愿意，可以换个更具体的训练或营养问题问我。";
+
+    /** Mock 认识的全部工具名（兜底判定用，见 {@link #availableTools}） */
+    private static final List<String> KNOWN_TOOLS = List.of(
+            "queryMyBodyProfile", "searchCourses", "queryCourseDetail", "prePlaceOrder");
+
+    /** 搜课关键词的候选词表（从提问里挑一个最像关键词的） */
+    private static final List<String> COURSE_KEYWORDS = List.of(
+            "哑铃", "增肌", "减脂", "核心", "入门", "拉伸", "全身", "上肢", "下肢",
+            "有氧", "力量", "新手", "塑形", "居家");
+
+    /** 最终回答里回显工具结果的最大字符数（太长会把回答撑爆） */
+    private static final int MAX_TOOL_ECHO = 400;
 
     private final AigcProperties props;
     private final StringRedisTemplate redis;
@@ -103,7 +117,8 @@ public class MockChatModel implements ChatModel {
         }
         return toResponse(plan.answer(),
                 estimateTokens(promptChars(prompt)),
-                estimateTokens(plan.answer().length()));
+                estimateTokens(plan.answer().length()),
+                plan.toolCalls());
     }
 
     @Override
@@ -112,8 +127,16 @@ public class MockChatModel implements ChatModel {
         if (plan.error() != null) {
             return Flux.error(plan.error());
         }
-        List<String> chunks = split(plan.answer(), props.getMock().getChunkSize());
         int promptTokens = estimateTokens(promptChars(prompt));
+
+        // ★ 工具调用不分片：模型"决定调工具"不是打字过程，切成多片只会让上层
+        //   收到好几份一样的 tool_call（工具会被执行多次）。
+        //   真模型也是这个行为 —— 工具调用的 delta 是整体到达的。
+        if (!plan.toolCalls().isEmpty()) {
+            return Flux.just(toResponse("", promptTokens, 1, plan.toolCalls()));
+        }
+
+        List<String> chunks = split(plan.answer(), props.getMock().getChunkSize());
         // ★ 每个分片都带上"到当前为止"的累计 token，而不是只在最后一片给。
         //   真模型也是这个行为（有些渠道每片都回 usage），而且这样调用方
         //   **不需要写"最后一片才取 usage"的特判** —— 少一个容易写错的约定。
@@ -122,7 +145,7 @@ public class MockChatModel implements ChatModel {
                 .delayElements(Duration.ofMillis(plan.delayMs()))
                 .map(chunk -> {
                     accumulated.append(chunk);
-                    return toResponse(chunk, promptTokens, estimateTokens(accumulated.length()));
+                    return toResponse(chunk, promptTokens, estimateTokens(accumulated.length()), List.of());
                 });
     }
 
@@ -131,8 +154,13 @@ public class MockChatModel implements ChatModel {
     /**
      * 决定这一轮怎么"演"。
      *
-     * <p>顺序有讲究：错误指令优先于正常回答，否则带 {@code [MOCK:ERROR]}
-     * 的提问会先被关键词表命中、返回一段正常回答，降级路径根本走不到。</p>
+     * <p>顺序有讲究：
+     * ① 错误指令最优先（否则带 {@code [MOCK:ERROR]} 的提问会先被关键词表命中、
+     * 返回一段正常回答，降级路径根本走不到）；
+     * ② <b>工具结果优先于一切正常生成</b> —— 一旦 prompt 里出现了
+     * {@code ToolResponseMessage}，说明工具已经跑完了，这时必须产出最终回答，
+     * 否则会陷入"再调一次工具"的循环；
+     * ③ 分类任务在工具之后（路由 Agent 不挂工具）。</p>
      */
     private MockPlan plan(Prompt prompt) {
         String userText = lastUserText(prompt);
@@ -142,17 +170,29 @@ public class MockChatModel implements ChatModel {
             log.info("[Mock通道] 按指令模拟模型超时");
             // ★ 用 TimeoutException 而不是别的类型：Reactor 的 timeout() 抛的也是它，
             //   于是"模型侧超时"与"我方超时"共用同一个降级分支（一处兜底，两条路都覆盖）
-            return new MockPlan("", new TimeoutException("模拟模型侧超时"), 0);
+            return new MockPlan("", new TimeoutException("模拟模型侧超时"), 0, List.of());
         }
         if (userText.contains(CMD_ERROR)) {
             log.info("[Mock通道] 按指令模拟模型服务异常");
-            return new MockPlan("", new RuntimeException("模拟模型服务异常"), 0);
+            return new MockPlan("", new RuntimeException("模拟模型服务异常"), 0, List.of());
         }
-        if (userText.contains(CMD_TOOL)) {
-            // 工具调用由上层处理（见 ToolCallingManager 的接入，M6-4）；
-            // 这里先把"一个只带 tool_call、不带正文"的响应形态准备好
-            log.info("[Mock通道] 按指令模拟工具调用");
-            return new MockPlan(buildToolAnswer(userText), null, props.getMock().getChunkDelayMs());
+
+        // ★ M6-4：工具结果已就位 —— 先判断"还差工具吗"，差就继续调，不差才收尾。
+        //
+        //   ⚠️ "拿到工具结果就立刻收尾"是不够真实的：真模型会分步来
+        //   （先查用户档案 → 再按目标搜课 → 最后组织回答）。
+        //   多步链也让**工具循环本身**被真正跑满 —— 而循环恰恰是最容易出问题的地方
+        //   （无限循环、结果丢失、请求体越来越长）。
+        String toolResults = collectToolResults(prompt);
+        if (toolResults != null) {
+            java.util.Set<String> called = calledToolNames(prompt);
+            MockPlan next = planToolCall(prompt, userText, called);
+            if (next != null) {
+                log.info("[Mock通道] 已有工具结果（{} 字），仍需继续调用工具，已调用过={}", toolResults.length(), called);
+                return next;
+            }
+            log.info("[Mock通道] 工具齐了（已调用 {}）→ 生成最终回答", called);
+            return new MockPlan(finalAnswer(toolResults), null, props.getMock().getChunkDelayMs(), List.of());
         }
 
         // ★ 分类任务（意图路由）：必须返回一个确定的类别
@@ -161,32 +201,193 @@ public class MockChatModel implements ChatModel {
             log.info("[Mock通道] 识别为分类任务，按关键词判定类别={}", category);
             // 分类任务返回"干净的一个词"（不带上下文后缀）——
             // 真模型在这种 prompt 下也是只输出一个词的
-            return new MockPlan(category, null, 0);
+            return new MockPlan(category, null, 0, List.of());
         }
 
         // ★ RAG 拒答：知识库检索为空时，prompt 里会带一段"没有检索到资料"的说明。
         //   一个行为端正的模型此时应该拒答而不是硬编 —— Mock 照着做，
         //   于是"检索为空 → 拒答"这条链路在验收里**真的被执行到**。
-        //   （判定依据是我们的 prompt 组装，不是在验证 Mock 自己。）
         if (containsAny(userText, "没有检索到任何相关的知识库资料")) {
             log.info("[Mock通道] prompt 里带「无资料」说明 → 按拒答回答（模拟行为端正的模型）");
-            return new MockPlan(REFUSAL_ANSWER, null, props.getMock().getChunkDelayMs());
+            return new MockPlan(REFUSAL_ANSWER, null, props.getMock().getChunkDelayMs(), List.of());
+        }
+
+        // ★ M6-4：prompt 里带了工具、且提问有明确诉求 → 发起一次工具调用
+        MockPlan toolPlan = planToolCall(prompt, userText, java.util.Set.of());
+        if (toolPlan != null) {
+            return toolPlan;
         }
 
         int delay = userText.contains(CMD_SLOW)
                 ? props.getMock().getChunkDelayMs() * 10
                 : props.getMock().getChunkDelayMs();
-        return new MockPlan(answer(userText, prompt), null, delay);
+        return new MockPlan(answer(userText, prompt), null, delay, List.of());
     }
 
-    private boolean containsAny(String text, String... keys) {
-        for (String key : keys) {
-            if (text.contains(key)) {
-                return true;
+    // ==================== M6-4：工具调用模拟 ====================
+
+    /**
+     * 决定要不要调工具、调哪个、带什么参数。
+     *
+     * <p>★ 判定依据是<b>提问里的关键词</b>，不是"提问里带了测试标记" ——
+     * 这一点是刻意的：带了标记的 Mock 只能验证"我们写的代码能跑通标记"，
+     * 而按关键词判定至少复现了真模型的决策形态
+     * （用户说"推荐一门哑铃课" → 模型决定去搜课）。
+     * 验收脚本也用自然语言提问来驱动它，而不是塞一个只有 Mock 认识的暗号。</p>
+     *
+     * @return null 表示这一轮不调工具（直接生成回答）
+     */
+    private MockPlan planToolCall(Prompt prompt, String userText, java.util.Set<String> alreadyCalled) {
+        List<String> tools = availableTools(prompt);
+        if (tools.isEmpty()) {
+            return null;
+        }
+        String q = stripCommands(userText);
+        boolean forced = userText.contains(CMD_TOOL);
+
+        // ① 用户档案（★ 注意：没有 userId 参数 —— 工具查的永远是"当前登录用户"）
+        if (tools.contains("queryMyBodyProfile") && !alreadyCalled.contains("queryMyBodyProfile")
+                && (forced || containsAny(q, "体测", "身体档案", "我的档案", "体脂", "BMI", "bmi", "我的身体"))) {
+            return toolCall("queryMyBodyProfile", "{}");
+        }
+        // ② 下单（courseIds 从提问里抽数字；抽不到就传空，正好验证"参数校验"那条兜底）
+        if (tools.contains("prePlaceOrder") && !alreadyCalled.contains("prePlaceOrder")
+                && containsAny(q, "买", "下单", "报名", "支付", "购买", "付款")) {
+            return toolCall("prePlaceOrder", "{\"courseIds\":" + extractIds(q) + "}");
+        }
+        // ③ 课程详情（问题里带课程 id 时）
+        if (tools.contains("queryCourseDetail") && !alreadyCalled.contains("queryCourseDetail")
+                && containsAny(q, "详情", "介绍", "几节", "目录")) {
+            List<String> ids = parseIds(q);
+            if (!ids.isEmpty()) {
+                return toolCall("queryCourseDetail", "{\"courseId\":" + ids.get(0) + "}");
             }
         }
-        return false;
+        // ④ 搜课
+        if (tools.contains("searchCourses") && !alreadyCalled.contains("searchCourses")
+                && (forced || containsAny(q, "推荐", "课程", "上课", "练什么", "适合我", "搜"))) {
+            return toolCall("searchCourses", "{\"keyword\":\"" + extractKeyword(q) + "\"}");
+        }
+        return null;
     }
+
+    /** prompt 里已经返回过结果的工具名（多步链靠它避免重复调用同一个工具） */
+    private java.util.Set<String> calledToolNames(Prompt prompt) {
+        java.util.Set<String> names = new java.util.LinkedHashSet<>();
+        for (Message m : prompt.getInstructions()) {
+            if (m instanceof ToolResponseMessage trm) {
+                for (ToolResponseMessage.ToolResponse r : trm.getResponses()) {
+                    names.add(r.name());
+                }
+            }
+        }
+        return names;
+    }
+
+    /**
+     * 当前 prompt 里有哪些工具可用。
+     *
+     * <p>① 优先读模型选项里的工具定义（{@code ChatClient.tools(...)} 会把它们放进
+     * {@code ToolCallingChatOptions}）；② 读不到就退回到"system 提示词里点名了工具名"
+     * —— 我们的人设提示词本来就写清了有哪些工具，所以这条兜底是可用的。
+     * 两条都不命中就说明这一轮确实没挂工具（例如 SIMPLE 策略），直接生成回答。</p>
+     */
+    private List<String> availableTools(Prompt prompt) {
+        List<String> names = new ArrayList<>();
+        try {
+            if (prompt.getOptions() instanceof ToolCallingChatOptions options
+                    && options.getToolCallbacks() != null) {
+                options.getToolCallbacks().forEach(cb -> names.add(cb.getToolDefinition().name()));
+            }
+        } catch (Exception e) {
+            log.debug("[Mock通道] 读取工具定义失败，改用提示词兜底：{}", e.getMessage());
+        }
+        if (names.isEmpty()) {
+            String all = prompt.getContents();
+            for (String candidate : KNOWN_TOOLS) {
+                if (all.contains(candidate)) {
+                    names.add(candidate);
+                }
+            }
+        }
+        return names;
+    }
+
+    /** 组装一次工具调用。id 由"工具名+参数"派生，是确定性的 —— 验收断言才有依据 */
+    private MockPlan toolCall(String name, String args) {
+        String id = "call_" + Integer.toHexString((name + args).hashCode());
+        log.info("[Mock通道] 决定调用工具：{}（toolCallId={}）", name, id);
+        return new MockPlan("", null, 0,
+                List.of(new AssistantMessage.ToolCall(id, "function", name, args)));
+    }
+
+    /**
+     * 收集 prompt 里的工具结果。
+     *
+     * <p>★ 这个方法就是 Mock 的"循环终止条件"：一旦拿到工具结果，
+     * 就必须产出最终回答，而不是再调一次工具。</p>
+     *
+     * @return null 表示还没有工具结果（这是第一轮）
+     */
+    private String collectToolResults(Prompt prompt) {
+        StringBuilder sb = new StringBuilder();
+        for (Message m : prompt.getInstructions()) {
+            if (m instanceof ToolResponseMessage trm) {
+                for (ToolResponseMessage.ToolResponse r : trm.getResponses()) {
+                    if (r.responseData() != null && !r.responseData().isBlank()) {
+                        sb.append(r.responseData()).append('\n');
+                    }
+                }
+            }
+        }
+        return sb.isEmpty() ? null : sb.toString();
+    }
+
+    /**
+     * 基于工具结果的最终回答。
+     *
+     * <p>★ <b>刻意把工具返回的原文回显进回答里</b>：这是"工具确实被执行了、
+     * 结果确实到达了模型"的直接证据。如果只输出一句"我查到了一些课程"，
+     * 验收脚本就只能断言"回答非空"，那等于没断言。</p>
+     */
+    private String finalAnswer(String toolResults) {
+        String echo = toolResults.trim();
+        if (echo.length() > MAX_TOOL_ECHO) {
+            echo = echo.substring(0, MAX_TOOL_ECHO) + "…";
+        }
+        return "我查了一下，结果如下：\n" + echo + "\n（Mock 通道 · 基于工具返回的真实数据）";
+    }
+
+    /** 从提问里抽数字当课程 id（真模型也是从用户话里读 id 的） */
+    private String extractIds(String text) {
+        return "[" + String.join(",", parseIds(text)) + "]";
+    }
+
+    private List<String> parseIds(String text) {
+        List<String> ids = new ArrayList<>();
+        for (String token : text.split("[^0-9]+")) {
+            if (token.length() >= 3) {
+                ids.add(token);
+            }
+        }
+        return ids;
+    }
+
+    /** 从提问里挑一个搜课关键词：先查词表，再退化到"去掉虚词后的前几个字" */
+    private String extractKeyword(String q) {
+        for (String kw : COURSE_KEYWORDS) {
+            if (q.contains(kw)) {
+                return kw;
+            }
+        }
+        String cleaned = q.replaceAll("[？?。，,！!的了想帮我推荐一门个课程有些什么]", "").trim();
+        if (cleaned.isEmpty()) {
+            cleaned = q;
+        }
+        return cleaned.length() > 8 ? cleaned.substring(0, 8) : cleaned;
+    }
+
+    // ==================== 通用判定与生成 ====================
 
     /**
      * 判断这是不是一个"分类任务"（如意图路由）。
@@ -286,8 +487,16 @@ public class MockChatModel implements ChatModel {
         return count;
     }
 
-    private String buildToolAnswer(String userText) {
-        return "我来帮你看看合适的课程。（Mock 通道 · 工具调用）";
+    private boolean containsAny(String text, String... keys) {
+        if (text == null) {
+            return false;
+        }
+        for (String key : keys) {
+            if (text.contains(key)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 把回答切成"像真模型一样"的分片 */
@@ -303,8 +512,14 @@ public class MockChatModel implements ChatModel {
         return chunks;
     }
 
-    private ChatResponse toResponse(String text, int promptTokens, int completionTokens) {
-        AssistantMessage message = new AssistantMessage(text);
+    private ChatResponse toResponse(String text, int promptTokens, int completionTokens,
+                                    List<AssistantMessage.ToolCall> toolCalls) {
+        // ★ 带 tool_call 的响应**正文是空的** —— 真模型调工具时也是这样：
+        //   它不是"边说边调"，而是先说要调哪个工具（结构化），拿到结果再组织语言。
+        AssistantMessage message = AssistantMessage.builder()
+                .content(text)
+                .toolCalls(toolCalls)
+                .build();
         Generation generation = new Generation(message, ChatGenerationMetadata.NULL);
         // ★ token 数不能为 0：可观测那组验收断言的就是"这些列非 0"。
         //   这里按"中文约 2 字符 1 token"粗估 —— Mock 不需要精确，
@@ -375,6 +590,7 @@ public class MockChatModel implements ChatModel {
     }
 
     /** 一轮"演出计划" */
-    private record MockPlan(String answer, Throwable error, int delayMs) {
+    private record MockPlan(String answer, Throwable error, int delayMs,
+                            List<AssistantMessage.ToolCall> toolCalls) {
     }
 }
