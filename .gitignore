@@ -70,3 +70,16 @@ frontend/**/pnpm-lock.yaml
 *.orig
 .DS_Store
 Thumbs.db
+
+# EdgeOne Makers 部署包（每次现拼，不入库）
+deploy/_build/
+
+# 隧道地址（随演示窗口变化，不入库）
+deploy/upstream.txt
+
+# ★★ 根目录 `.env`：`edgeone makers env set` 会往这里写环境变量（可能是密钥）
+#    上面只忽略了 docker/.env，**根目录这个漏了** —— M8-4a 逐条核对时发现。
+/.env
+
+# EdgeOne Makers 的项目关联状态（`edgeone makers link` 生成，属本地状态）
+.edgeone/
