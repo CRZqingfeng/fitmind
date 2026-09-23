@@ -28,11 +28,28 @@ function check(name, ok, detail) {
 function section(t) { console.log('\n【' + t + '】') }
 
 const read = (p) => readFileSync(join(ROOT, p), 'utf8')
-const sh = (cmd) => {
-  try { return execSync(cmd, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }) }
-  catch { return '' }
-}
 const rel = (p) => p.replace(ROOT + '\\', '').replace(ROOT + '/', '')
+
+// ★★ git 在 Node 的 execSync 里可能**不在 PATH**（本机 git 装在 D:/develop/Git，
+//    只被 bash 的 shim 暴露给 shell，Node 的进程环境里没有）→ 必须探测可执行路径。
+const GIT_CANDIDATES = ['git', process.env.GIT_EXE,
+  'D:/develop/Git/cmd/git.exe', 'C:/Program Files/Git/cmd/git.exe'].filter(Boolean)
+let GIT = null
+for (const c of GIT_CANDIDATES) {
+  try { execSync('"' + c + '" --version', { stdio: 'ignore' }); GIT = c; break } catch { /* 试下一个 */ }
+}
+
+// ★★ 失败时返回 **null**，绝不返回空串 ——
+//    否则「git status 干净」这类"期望为空"的断言会在**命令根本没跑**时假通过。
+const sh = (args) => {
+  if (!GIT) return null
+  try {
+    return execSync('"' + GIT + '" ' + args,
+      { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+  } catch { return null }
+}
+check('能执行 git（否则后续 git 相关断言不可信）', GIT !== null,
+  '未找到 git，可用 GIT_EXE 环境变量指定')
 
 console.log('============================================================')
 console.log('  M8-4a 验收：仓库门面')
@@ -98,6 +115,9 @@ const hits = []
     if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) walk(join(dir, e.name)); continue }
     if (!TEXT_EXT.has(extname(e.name).toLowerCase())) continue
     const p = join(dir, e.name)
+    // ★ 扫描器必须"写出"敏感模式才能扫它 → 会被自己命中（自指）。
+    //   本文件只含模式、不含真实值，因此显式排除自身。
+    if (p === join(ROOT, 'scripts', 'accept-m8-4a.mjs')) continue
     let txt = ''
     try { txt = readFileSync(p, 'utf8') } catch { continue }
     for (const pair of SECRETS) {
@@ -110,7 +130,8 @@ const hits = []
 })(ROOT)
 check('★ 仓库内无真实隧道子域 / eo_token / API key', hits.length === 0, hits.slice(0, 3).join(' | '))
 
-const tracked = sh('git -c core.quotepath=false ls-files').split('\n').filter(Boolean)
+const tracked = (sh('-c core.quotepath=false ls-files') || '').split('\n').filter(Boolean)
+check('能读到已入库文件清单', tracked.length > 0, 'git ls-files 无输出（后续断言不可信）')
 check('已入库文件不含 .env（.env.example 除外）',
   !tracked.some((f) => /(^|\/)\.env$/.test(f) || /\.env\.local$/.test(f)))
 check('已入库文件不含隧道地址文件', !tracked.some((f) => f.endsWith('upstream.txt')))
@@ -149,10 +170,15 @@ check('汇编已修过期数字（35 条）',
 // ================================================================
 section('5. 工作区状态')
 
-const dirty = sh('git status --porcelain').trim()
-check('★ git status 干净（无未提交改动）', dirty === '', dirty.split('\n').slice(0, 3).join(' | '))
-const recent = sh('git log --oneline -8').split('\n').filter((l) => /M8|M7|基础设施/.test(l))
-check('有提交历史（M7/M8/基础设施 ≥ 4 条）', recent.length >= 4, '找到 ' + recent.length + ' 条')
+const dirty = sh('status --porcelain')
+check('★ git status 干净（无未提交改动）',
+  dirty !== null && dirty.trim() === '',
+  dirty === null ? '无法执行 git（未找到可执行文件）' : dirty.split('\n').slice(0, 3).join(' | '))
+
+const log = sh('log --oneline -8')
+const recent = log === null ? [] : log.split('\n').filter((l) => /M8|M7|基础设施/.test(l))
+check('有提交历史（M7/M8/基础设施 ≥ 4 条）', recent.length >= 4,
+  log === null ? '无法执行 git' : '找到 ' + recent.length + ' 条')
 
 // ================================================================
 console.log('\n============================================================')
