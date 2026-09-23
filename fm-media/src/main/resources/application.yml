@@ -22,8 +22,8 @@ fm:
         - /files/**
         - /medias/**
       excludeLoginPaths:
-        # 注意：Spring MVC 的路径匹配只针对「路径」，不支持 METHOD:/path 写法
-        # （METHOD: 前缀只在本项目网关的自定义匹配中支持）
+        # 注意：**登录拦截**的路径匹配只针对「路径」，不支持 METHOD:/path 写法
+        # （METHOD: 前缀目前只在网关的自定义匹配、以及下面的 admin.pathPatterns 中支持）
         # 内部 Feign 调用没有 token，必须放行，否则课程模块查不到媒资
         - /medias/internal/**
         - /students/register
@@ -34,6 +34,48 @@ fm:
         - /users/detail/**
         - /users/list
         - /users/ids
+      # ==================== 管理端鉴权（#A9 修复；M7-10 改为方法级） ====================
+      # 修复前：本服务的接口只过 LoginAuthInterceptor（只校验"已登录"），
+      #         于是任意**学员**账号都能删媒资 —— 实测确认过。
+      #
+      # ★★ 为什么不能写 `/medias/**`：
+      #    SDK 的保护按**路径前缀**匹配（Ant pattern），**区分不了 HTTP 方法**，
+      #    而 `/medias/**` 下混着三类调用方：
+      #      · GET  /medias/{id}/play-url   ← 学员端播视频在用（portal/src/api/media.ts）
+      #      · GET  /medias/internal/{id}   ← 课程模块的 Feign 内部调用
+      #      · 其余                          ← 才是管理端语义
+      #    写成 `/medias/**` 会**同时打断学员端播放和课程详情**。
+      #
+      # ★★★ M7-10 起 SDK 的 pathPatterns 支持 `METHOD:/path`，
+      #    于是"学员也要上传视频"这件事才有解：
+      #      `POST /medias/upload-signature`（学员上传动作考核视频）
+      #      与 `DELETE /medias/{id}`（只有运营能删）**路径形状完全相同**，
+      #      以前只能二选一（要么误伤学员上传、要么放开删除）。
+      admin:
+        enabled: true
+        pathPatterns:
+          # 分页(GET) / 批量删除(DELETE)：管理端语义
+          - /medias
+          # 管理端预览
+          - /medias/*/preview-url
+          # ★ 单条删除：只有运营能删 —— 用方法级，避免连"学员上传"一起拦掉
+          - DELETE:/medias/*
+          # ★ 刻意**不圈**下面这些：
+          #     POST /medias/upload-signature   申请直传签名（学员上传动作考核视频）
+          #     POST /medias/*/confirm          上传完成后确认（同一流程的一环）
+          #   它们仍受 LoginAuthInterceptor 保护（includeLoginPaths 含 /medias/**），
+          #   即"必须登录，但不要求管理员"。
+          #
+          # ★★ `/files/**` 也**刻意不圈**（M7-11 撤下）：它是**通用文件服务**，
+          #    不是运营专属 —— `BizType` 含 `avatar` / `common` 这类**学员侧**用途，
+          #    而 M2-1 验收脚本本来就用**学员** token 上传封面（`bizType=media-cover`）。
+          #    M7-9 把它一起圈进来属于**收权收宽了**：把"学员的通用文件能力"当成
+          #    "运营的媒资管理"给拦了 → M2-1 从那天起就红。
+          #    真正的运营面是 `/medias`（媒资列表/删除/预览），那几条已经拦住了。
+          #
+          # ⚠️ 由此留下的缺口（已登记 #A14）：`DELETE /files/{id}` 任何**登录用户**都能调。
+          #    但它的正解不是"要求管理员"，而是**归属校验**（只能删自己上传的）——
+          #    那一层 fm-media 目前没有。用角色去堵权限缺口会连正常功能一起堵掉。
 
 # ==================== XXL-JOB 执行器 ====================
 xxl:

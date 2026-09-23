@@ -1,0 +1,6 @@
+{
+  "name": "fitmind-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FitMind 学员端 —— EdgeOne Makers 部署包装（静态产物 + /api 反代函数）"
+}

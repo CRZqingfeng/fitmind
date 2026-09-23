@@ -103,6 +103,9 @@ public class CourseSearchInfoDTO implements Serializable {
     @Schema(description = "课程评分")
     private Integer score;
 
+    @Schema(description = "报名人数（M7-3 接通：由 fm-course 消费 order.pay / order.refund 维护）")
+    private Integer sold;
+
     @Schema(description = "发布次数")
     private Integer publishTimes;
 

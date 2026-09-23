@@ -21,8 +21,9 @@ import java.util.List;
  *         - /students/register
  *       admin:                    # 管理端（后台）鉴权，默认关闭
  *         enabled: true           # 只有真的有管理端接口的服务才打开
- *         pathPatterns:           # 默认 /admin/**
+ *         pathPatterns:           # 默认 /admin/**；★ 也支持 METHOD:/path
  *           - /admin/**
+ *           - DELETE:/medias/*    # ★ 只有 DELETE 要管理员，POST /medias/upload-signature 放行
  * </pre>
  */
 @Data
@@ -59,7 +60,21 @@ public class ResourceAuthProperties {
         /** 是否启用管理端鉴权拦截器。默认关：只有真有管理端接口的服务才开 */
         private boolean enabled = false;
 
-        /** 需要管理员身份的路径。约定是所有管理端接口放 /admin/** 下 */
+        /**
+         * 需要管理员身份的规则。约定是所有管理端接口放 {@code /admin/**} 下。
+         *
+         * <p>★ 每一项可以写成两种形式：</p>
+         * <ul>
+         *   <li><b>{@code /path/**}</b> —— 该路径下**所有 HTTP 方法**都要管理员；</li>
+         *   <li><b>{@code METHOD:/path/**}</b>（如 {@code DELETE:/medias/*}）—— **只有该方法**要管理员。</li>
+         * </ul>
+         *
+         * <p>★ 什么时候需要第二种：当"路径形状相同、权限要求不同"时。真实例子是
+         * {@code POST /medias/upload-signature}（学员要上传动作考核视频）与
+         * {@code DELETE /medias/{id}}（只有运营能删媒资）—— 路径形状完全一样，
+         * 而 Ant 风格匹配区分不了方法：写 {@code /medias/*} 会连学员上传一起拦掉，
+         * 不写又会把删除放开。</p>
+         */
         private List<String> pathPatterns = List.of("/admin/**");
     }
 }

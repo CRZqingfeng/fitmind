@@ -106,13 +106,25 @@ public class ResourceInterceptorConfiguration implements WebMvcConfigurer {
         if (adminAuthInterceptor == null) {
             return;
         }
-        List<String> adminPaths = authProperties.getAdmin().getPathPatterns();
+        List<String> adminPaths = CollectionUtils.isEmpty(authProperties.getAdmin().getPathPatterns())
+                ? List.of(DEFAULT_ADMIN_PATH)
+                : authProperties.getAdmin().getPathPatterns();
+
+        // ★★ 注册阶段只能给「路径」——addPathPatterns 不认 HTTP 方法。
+        //   而配置里允许写 `DELETE:/medias/*` 这种"路径 + 方法"，
+        //   所以这里必须把方法前缀剥掉再注册：否则那串字符会被当成一个普通路径，
+        //   永远匹配不上 → **拦截器根本不会被调用 → 配置静默失效**（不报错，也没有日志）。
+        //   真正的"路径 + 方法"判断在 AdminAuthInterceptor#requiresAdmin 里做。
+        List<String> registerPaths = adminPaths.stream()
+                .map(AdminAuthInterceptor::pathOnly)
+                .distinct()
+                .toList();
+
         registry.addInterceptor(adminAuthInterceptor)
-                .addPathPatterns(CollectionUtils.isEmpty(adminPaths)
-                        ? List.of(DEFAULT_ADMIN_PATH) : adminPaths)
+                .addPathPatterns(registerPaths)
                 .order(ADMIN_ORDER);
-        log.info("管理端鉴权拦截器已注册：路径={}，order={}",
-                CollectionUtils.isEmpty(adminPaths) ? List.of(DEFAULT_ADMIN_PATH) : adminPaths, ADMIN_ORDER);
+        log.info("管理端鉴权拦截器已注册：注册路径={}，完整规则={}，order={}",
+                registerPaths, adminPaths, ADMIN_ORDER);
     }
 
     /**
@@ -128,7 +140,9 @@ public class ResourceInterceptorConfiguration implements WebMvcConfigurer {
     @Bean
     @ConditionalOnProperty(prefix = "fm.auth.resource.admin", name = "enabled", havingValue = "true")
     public AdminAuthInterceptor adminAuthInterceptor(@Lazy UserClient userClient) {
-        return new AdminAuthInterceptor(userClient);
+        // ★ 把"完整规则"（含 `METHOD:/path`）交给拦截器：注册阶段表达不了方法，
+        //   真正的判定必须在拦截器内部完成。见 AdminAuthInterceptor#requiresAdmin。
+        return new AdminAuthInterceptor(userClient, authProperties.getAdmin().getPathPatterns());
     }
 
     /**

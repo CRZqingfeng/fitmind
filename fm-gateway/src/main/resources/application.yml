@@ -17,6 +17,7 @@ fm:
       - POST:/as/accounts/login
       - POST:/as/accounts/admin/login
       - GET:/as/accounts/refresh
+      - GET:/as/accounts/admin/refresh
       - POST:/us/codes
       - POST:/us/students/register
       # 接口文档与健康检查

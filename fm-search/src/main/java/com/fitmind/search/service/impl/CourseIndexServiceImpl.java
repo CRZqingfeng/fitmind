@@ -75,8 +75,11 @@ public class CourseIndexServiceImpl implements ICourseIndexService {
                 .type(info.getCourseType())
                 .price(info.getPrice())
                 .score(info.getScore())
-                // 报名人数：M4 交易模块上线后才有真实值，这里先置 0 占位
-                .sold(0)
+                // ★ M7-3 起接通真实报名人数（此前是硬编码 0，前端拿到的"多少人练过"永远是 0）。
+                //   兜底成 0 而不是直接传 null：这个字段既参与 rankBy=sold 排序、
+                //   又要在列表页显示，排序字段为 null 时 ES 的排序位置不是"最小那么直观"，
+                //   与其让"按热度排序"的结果变得不可预测，不如明确按 0 参与排序。
+                .sold(info.getSold() == null ? 0 : info.getSold())
                 .teacherIds(teacherIds)
                 .teacherNames(teacherNames)
                 .sections(info.getSectionNum())

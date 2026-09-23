@@ -27,6 +27,21 @@ fm:
         - /discount/**
       excludeLoginPaths:
         - /health
+      # ==================== 管理端鉴权（#A9 修复，2026-09-20 补） ====================
+      # 修复前：任意**学员**账号都能建券并发放（`POST /coupons` + `PUT /coupons/{id}/issue`）。
+      #
+      # ★★ 为什么只圈这两组：
+      #    · /coupons/**        建券 + 发放 —— 只有运营会调
+      #    · /exchange-codes/** 生成兑换码 —— 只有运营会调
+      #    ⚠️ **不能**圈 `/user-coupons/**`：admin 页面的「我的券」也调它（管理员本身也是用户），
+      #       圈进来会让管理员自己的券列表 403；学员端的券列表更是直接依赖它。
+      #    ⚠️ **不能**圈 `/internal/**`：结算页试算**直接调** `/prs/internal/discount/detail`
+      #       （前端注释里写明"网关只按 /prs/** 判需要登录"）—— 圈进来会让结算页算不出优惠。
+      admin:
+        enabled: true
+        pathPatterns:
+          - /coupons/**
+          - /exchange-codes/**
 
 # ==================== 促销业务参数 ====================
 promotion:

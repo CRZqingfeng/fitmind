@@ -36,6 +36,51 @@ fm:
         # 内部 Feign 调用不走网关，没有 token，必须放行
         - /courses/internal/**
         - /health
+      # ==================== 管理端鉴权（#A9 收尾，2026-09-21 补） ====================
+      # 修复前：本服务的接口只过 LoginAuthInterceptor（只校验「已登录」），
+      #         于是任意**学员**账号都能建课、改课、上架、下架、删课，
+      #         还能 `GET /subjects/page` 直接拿走**所有题目的答案与解析**。
+      #
+      # ★★ 这是 #A9 里最后一块，也是最难的一块，难点不在路径划分，而在「调用方」：
+      #    修好它必须**同时改 scripts/ 下的验收脚本** —— 那些脚本一直用**学员 token** 建课
+      #    （seed-demo-data.mjs 里曾写着「建课接口只要求已登录，不限角色」，
+      #     那句注释描述的正是这个漏洞）。现已统一改为**教练（staff）token**。
+      #
+      # ★ 为什么用 `METHOD:/path` 而不是纯路径：/courses 下的路径**同形不同权**——
+      #     GET  /courses/baseInfo/{id}  ← 学员端课程详情（必须放行）
+      #     POST /courses/baseInfo/save  ← 管理端保存（必须拦）
+      #   纯路径 pattern 区分不了方法，只能把整个 /courses/** 放进来，
+      #   那会连学员端课程详情一起拦掉。（SDK 的方法级匹配见 ResourceAuthInterceptor）
+      #
+      # ★★ 刻意**不拦**的三条（都是学员端在用的读接口，拦了会静默打断用户端）：
+      #     GET /courses/baseInfo/{id}   ← 学员端课程详情（虽然它「优先取草稿」）
+      #     GET /courses/teachers/{id}   ← 学员端看教练（带 see=true）
+      #     GET /courses/{id}/catalogs   ← 学员端看训练目录
+      #     GET /categorys/**            ← 分类列表，学员端也用来做筛选（数据本就不敏感）
+      admin:
+        enabled: true
+        pathPatterns:
+          # ---- 课程写入（管理端专属）----
+          - POST:/courses/baseInfo/save
+          - POST:/courses/catas/save/**
+          - POST:/courses/media/save/**
+          - POST:/courses/teachers/save
+          - POST:/courses/upShelf
+          - POST:/courses/downShelf
+          - DELETE:/courses/delete/**
+          # ---- 课程管理端读：列表含**未上架**课程；catas 默认 see=false → 草稿目录 ----
+          - GET:/courses/page
+          - GET:/courses/checkName
+          - GET:/courses/checkBeforeUpShelf/**
+          - GET:/courses/catas/**
+          # ---- 题目：这两个接口**都含答案与解析**（学员只能经 /practices 拿题，那条不下发答案）----
+          - /subjects/**
+          - /courses/subjects/**
+          # ---- 分类写入（读接口刻意不拦，见上面说明）----
+          - POST:/categorys/add
+          - PUT:/categorys/update
+          - PUT:/categorys/disableOrEnable
+          - DELETE:/categorys/**
 
 # ==================== 本地开发环境 ====================
 ---

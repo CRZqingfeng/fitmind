@@ -58,6 +58,19 @@ public interface MqConstants {
          */
         String COURSE_DELETE_KEY = "course.delete";
 
+        /**
+         * 课程索引需要刷新（M7-3）。
+         *
+         * <p>生产方 fm-course，消费方 fm-search，消息体是课程 id。</p>
+         *
+         * <p>★ 为什么不复用 {@link #COURSE_UP_KEY}：上架与"改了个数字"在搜索侧
+         * 虽然都走 {@code saveCourseIndex}（都是"按 id 重建这一篇文档"），
+         * 但<b>语义是两件事</b>。复用会让日志里出现"收到课程上架消息"而课程根本没上架，
+         * 排查时先怀疑自己看错，再怀疑是不是有人误操作上架了 ——
+         * 一个只值 10 行的新 key，换掉这类困惑很划算。</p>
+         */
+        String COURSE_UPDATE_KEY = "course.update";
+
         /** 完成训练动作（学习积分事件；常见实现只有消费者没有生产者，M3 接通） */
         String SECTION_LEARNED = "section.learned";
 
@@ -202,6 +215,31 @@ public interface MqConstants {
         /** 课程过期队列（M3 课程过期时用，同样由 fm-search 消费） */
         String COURSE_EXPIRE_QUEUE = "course.expire.queue";
 
+        /** 课程索引刷新队列（M7-3，fm-search 消费） */
+        String COURSE_UPDATE_QUEUE = "course.update.queue";
+
+        /**
+         * 报名人数变动队列（M7-3，fm-course 消费）。
+         *
+         * <p>与 {@link #ORDER_PAY_QUEUE}（fm-learning 写课表）、
+         * {@link #ORDER_PAY_NOTICE_QUEUE}（fm-message 发站内信）、
+         * {@link #DATA_ORDER_PAY_QUEUE}（fm-data 统计）<b>绑同一个 routing key
+         * {@code order.pay}</b>，队列名各不相同 —— 又一个"一条业务事件、多个消费者
+         * 各收各的"的实例，生产方（fm-trade）一行都不用改。</p>
+         */
+        String COURSE_SOLD_QUEUE = "course.sold.queue";
+
+        /**
+         * 报名人数回退队列（M7-3，fm-course 消费，绑 {@code order.refund}）。
+         *
+         * <p>为什么必须单开一个队列而不是让上面那个绑两个 key：一个
+         * {@code @RabbitListener} 方法只能绑一个队列，而两个方向收到的是
+         * <b>不同的消息体</b>（{@code OrderPayMessage} / {@code OrderRefundMessage}）
+         * 且要做<b>方向相反</b>的处理。用同一个队列会让"这条消息该加还是该减"
+         * 变成运行时的判断 —— 那是把编译期就能确定的事推到了运行期。</p>
+         */
+        String COURSE_SOLD_REFUND_QUEUE = "course.sold.refund.queue";
+
         /** 学习积分队列（fm-learning 消费，完成训练动作 +10） */
         String LEARNING_POINTS_QUEUE = "learning.points.queue";
 
@@ -263,8 +301,10 @@ public interface MqConstants {
          */
         String ORDER_PAY_NOTICE_QUEUE = "order.pay.notice.queue";
 
-        /** 体测完成队列（fm-exam 生产 → fm-data 消费，统计用） */
-        String ASSESSMENT_QUEUE = "assessment.created.queue";
+        // ⚠️ 这里**故意没有**体测事件的独立队列常量：
+        //   曾经定义过 `ASSESSMENT_QUEUE = "assessment.created.queue"`，但从未有消费者，
+        //   RabbitMQ 里也从来没有这个队列（M8-2c 的「声明 vs 实际」对账把它抓出来了，见 #C34③）。
+        //   体测事件由下面的 `DATA_ASSESSMENT_QUEUE` 消费 —— 需要的是那一个。
         // ==================== 数据中心（M5，全部由 fm-data 消费） ====================
         /**
          * 签到统计队列。

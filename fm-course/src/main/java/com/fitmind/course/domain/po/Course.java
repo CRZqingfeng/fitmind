@@ -61,6 +61,15 @@ public class Course implements Serializable {
     /** 评分 */
     private Integer score;
 
+    /**
+     * 报名人数。
+     *
+     * <p>冗余计数列，由 {@code CourseSoldListener} 消费 {@code order.pay} /
+     * {@code order.refund} 增量维护（不是查询时现算 —— 报名记录在 fm-learning、
+     * 订单在 fm-trade，都在别的库）。</p>
+     */
+    private Integer sold;
+
     /** 视频总时长，单位秒 */
     private Integer mediaDuration;
 

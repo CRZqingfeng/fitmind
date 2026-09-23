@@ -28,6 +28,15 @@ fm:
         - /admin/**
       excludeLoginPaths:
         - /health
+      # ==================== 管理端鉴权（#A9 修复，2026-09-20 补） ====================
+      # 本服务最省事：管理端接口本来就在 `/admin/**` 前缀下
+      # （`ActionAssessmentAdminController` = `/admin/action-assessments/**`），
+      # 正好是 SDK 的默认 pattern —— 只需要把开关打开。
+      # ★ 学员端提交考核走 `/action-assessments/**`（不带 /admin 前缀），不受影响。
+      admin:
+        enabled: true
+        pathPatterns:
+          - /admin/**
 
 # ==================== 体测业务参数 ====================
 exam:

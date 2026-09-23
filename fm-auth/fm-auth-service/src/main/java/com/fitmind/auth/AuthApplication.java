@@ -10,6 +10,7 @@ import org.springframework.cloud.openfeign.EnableFeignClients;
  *
  * <p>负责登录、签发与刷新 token，并通过 {@code GET /jwks} 对外提供验签公钥。</p>
  */
+//跨包扫描（因为依赖了 fm-auth-common、fm-auth-resource-sdk、fm-api 等）
 @SpringBootApplication(scanBasePackages = "com.fitmind")
 @EnableDiscoveryClient
 @EnableFeignClients(basePackages = "com.fitmind.api.client")

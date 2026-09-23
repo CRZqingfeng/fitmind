@@ -7,6 +7,8 @@ import com.fitmind.api.client.message.MessageClient;
 import com.fitmind.api.constants.NoticeTemplateCode;
 import com.fitmind.api.client.user.UserClient;
 import com.fitmind.api.dto.message.NoticeSendDTO;
+import com.fitmind.api.dto.user.UserDTO;
+import com.fitmind.api.dto.user.UserDTO;
 import com.fitmind.common.domain.dto.PageDTO;
 import com.fitmind.common.domain.query.PageQuery;
 import com.fitmind.common.exceptions.BizIllegalException;
@@ -23,8 +25,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * 动作考核服务实现。
@@ -159,7 +163,43 @@ public class ActionAssessmentServiceImpl extends ServiceImpl<ActionAssessmentMap
                 .eq(ActionAssessment::getStatus, STATUS_PENDING)
                 .orderByAsc(ActionAssessment::getSubmitTime)
                 .page(query.toMpPage());
-        return PageDTO.of(page, this::toVO);
+        PageDTO<ActionAssessmentVO> dto = PageDTO.of(page, this::toVO);
+        // ★ 管理端列表要显示"是谁提交的" —— 批量补一次用户名
+        fillUserNames(dto.getList());
+        return dto;
+    }
+
+    /**
+     * 批量补学员名（管理端列表用）。
+     *
+     * <p>★ 用 {@code queryUserByIds} **一次查一批**，而不是循环单查：
+     * 待评分列表一页 10~20 条，N+1 次 Feign 会把这个接口的耗时直接乘以条数。</p>
+     *
+     * <p>★ 失败**不影响列表**：名字只是展示信息，拉不到就先空着（前端显示 "—"）。
+     * 不能因为 fm-user 抖了一下，就让教练连待评分列表都打不开。</p>
+     */
+    private void fillUserNames(List<ActionAssessmentVO> list) {
+        if (list == null || list.isEmpty()) {
+            return;
+        }
+        List<Long> ids = list.stream()
+                .map(ActionAssessmentVO::getUserId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (ids.isEmpty()) {
+            return;
+        }
+        try {
+            List<UserDTO> users = userClient.queryUserByIds(ids);
+            Map<Long, String> nameById = users.stream()
+                    .filter(u -> u.getId() != null)
+                    .collect(Collectors.toMap(UserDTO::getId,
+                            u -> u.getName() == null ? "" : u.getName(), (a, b) -> a));
+            list.forEach(v -> v.setUserName(nameById.get(v.getUserId())));
+        } catch (Exception e) {
+            log.warn("补学员名失败（不影响待评分列表）：{}", e.getMessage());
+        }
     }
 
     private ActionAssessmentVO toVO(ActionAssessment r) {
@@ -168,6 +208,10 @@ public class ActionAssessmentServiceImpl extends ServiceImpl<ActionAssessmentMap
                 .setUserId(r.getUserId())
                 .setCourseId(r.getCourseId())
                 .setCataId(r.getCataId())
+                // ★★ M7-10 补：提交时只存了 mediaId；播放地址是带签名的临时地址、会过期，
+                //    不该存库 —— 前端拿 mediaId 现取一次 play-url 才拿得到有效地址。
+                //    （原先这里只透传 videoUrl，而它从来没被赋过值 → 学员和教练都看不到视频。）
+                .setMediaId(r.getMediaId())
                 .setVideoUrl(r.getVideoUrl())
                 .setRemark(r.getRemark())
                 .setStatus(r.getStatus())

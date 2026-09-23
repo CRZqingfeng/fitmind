@@ -51,6 +51,32 @@ public class CourseEventListener {
     }
 
     /**
+     * 课程索引刷新（M7-3）：课程数据变了，但课程本身没上架也没下架。
+     *
+     * <p>典型场景是<b>报名人数</b>——用户付款成功后这个数字变了，
+     * 它直接显示在课程列表上，还可能被用作排序依据（{@code rankBy=sold}）。
+     * 不刷新的话，用户会看到"刚买完，销量还是 0"。</p>
+     *
+     * <p>处理动作和上架完全一样（都是按 id 重建这一篇文档），
+     * 但 key 是独立的 —— 详见 {@code MqConstants.Key#COURSE_UPDATE_KEY} 的注释。</p>
+     */
+    @RabbitListener(bindings = @QueueBinding(
+            value = @Queue(value = MqConstants.Queue.COURSE_UPDATE_QUEUE, durable = "true"),
+            exchange = @Exchange(value = MqConstants.Exchange.COURSE_EXCHANGE, type = ExchangeTypes.TOPIC),
+            key = MqConstants.Key.COURSE_UPDATE_KEY
+    ))
+    public void listenCourseUpdate(Long courseId) {
+        try {
+            log.info("收到课程索引刷新消息：courseId={}", courseId);
+            courseIndexService.saveCourseIndex(courseId);
+        } catch (Exception e) {
+            // 只记日志不重投：见类注释说明
+            log.error("刷新课程索引失败，该课程的统计值可能仍是旧的。courseId={}，原因：{}",
+                    courseId, e.getMessage(), e);
+        }
+    }
+
+    /**
      * 课程下架：删索引。
      */
     @RabbitListener(bindings = @QueueBinding(
