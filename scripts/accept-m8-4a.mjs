@@ -99,6 +99,26 @@ const fences = (rm.match(/```/g) || []).length
 check('代码围栏成对', fences % 2 === 0, '找到 ' + fences + ' 个')
 
 // ================================================================
+section('1b. README-local（本机操作手册）')
+
+// ★ 门面之外还缺一份"给自己看的"：跑起来的步骤、常用命令、坑在哪
+const rmlPath = 'README-local.md'
+const hasRml = existsSync(join(ROOT, rmlPath))
+check('README-local.md 存在（本机操作手册）', hasRml)
+if (hasRml) {
+  const rml = read(rmlPath)
+  const RML_REQUIRED = ['## 1. 项目简介与用途', '## 2. 主要功能特性', '## 3. 安装与依赖',
+    '## 4. 快速上手', '## 5. 配置项说明', '## 6. 目录结构', '## 7. 部署',
+    '## 8. 怎么启动', '## 9. 常用命令速查', '## 10. 本地运行与调试',
+    '## 11. 常见问题与注意事项', '## 12. 贡献指南', '## 13. 许可证']
+  const missR = RML_REQUIRED.filter((s) => !rml.includes(s))
+  check('README-local 章节完整（13 节）', missR.length === 0, '缺 ' + missR.join(', '))
+  check('README-local 标注了「脚本含硬编码路径」', rml.includes('硬编码'))
+  check('README-local 说明了 Mock 范围', rml.includes('Mock'))
+  check('README-local 的 markdown 围栏成对', (rml.match(/```/g) || []).length % 2 === 0)
+}
+
+// ================================================================
 section('2. 脱敏（公开前置）')
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'target', '_build', 'logs', '.idea', 'dist'])
