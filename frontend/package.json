@@ -1,0 +1,29 @@
+{
+  "name": "fitmind-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "FitMind 前端工程根：包含 fitmind-portal（用户端）与 fitmind-admin（管理端）两个应用，以及端到端验收脚本",
+  "scripts": {
+    "dev:portal": "npm --prefix fitmind-portal run dev",
+    "dev:admin": "npm --prefix fitmind-admin run dev",
+    "build:portal": "npm --prefix fitmind-portal run build",
+    "build:admin": "npm --prefix fitmind-admin run build",
+    "accept": "node scripts/accept-web-m7-1.mjs",
+    "accept:m7-1": "node scripts/accept-web-m7-1.mjs",
+    "accept:all": "node scripts/accept-web-all.mjs",
+    "accept:m7-2": "node scripts/accept-web-m7-2.mjs",
+    "accept:m7-3": "node scripts/accept-web-m7-3.mjs",
+    "accept:m7-4": "node scripts/accept-web-m7-4.mjs",
+    "accept:m7-5": "node scripts/accept-web-m7-5.mjs",
+    "accept:m7-6": "node scripts/accept-web-m7-6.mjs",
+    "accept:m7-7": "node scripts/accept-web-m7-7.mjs",
+    "accept:m7-8": "node scripts/accept-web-m7-8.mjs",
+    "accept:m7-10": "node scripts/accept-web-m7-10.mjs",
+    "accept:m8-2a": "node scripts/accept-web-m8-2a.mjs",
+    "accept:m8-2c": "node scripts/accept-web-m8-2c.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}

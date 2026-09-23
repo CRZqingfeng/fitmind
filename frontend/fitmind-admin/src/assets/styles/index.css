@@ -1,0 +1,71 @@
+/**
+ * 全局样式 + 主题（轻度定制）
+ *
+ * 策略：只覆盖 Element Plus 的 CSS 变量，不引第二套 UI 库、不引 Tailwind。
+ * 理由：两套样式体系并存时，"这个间距到底是谁给的"要花很多时间排查，
+ *       而收益只是少写几行 CSS —— 不划算。
+ *
+ * 下方 light-3/5/7/8/9 与 dark-2 是主色按 Element Plus 的派生规则
+ * （与白/黑按比例混合）预先算好的值。写死 hex 而不是用 color-mix()，
+ * 是因为 Element Plus 内部还有基于这些变量做颜色运算的地方，写死更稳。
+ */
+:root {
+  /* 主色：健身场景的活力橙（替换 Element Plus 默认蓝 #409eff） */
+  --el-color-primary: #ff6b35;
+  --el-color-primary-light-3: #ff9772;
+  --el-color-primary-light-5: #ffb59a;
+  --el-color-primary-light-7: #ffd3c2;
+  --el-color-primary-light-8: #ffe1d7;
+  --el-color-primary-light-9: #fff0eb;
+  --el-color-primary-dark-2: #cc562a;
+
+  /* 布局尺寸（供各页面复用，避免同一数值散落多处） */
+  --fm-header-height: 60px;
+  --fm-page-max-width: 1200px;
+  --fm-radius: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+  background: #f5f7fa;
+  color: #303133;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+/* 页面通用容器：统一最大宽度与内边距 */
+.fm-page {
+  max-width: var(--fm-page-max-width);
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* 通用卡片标题 */
+.fm-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 600;
+}
