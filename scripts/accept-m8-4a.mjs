@@ -167,6 +167,16 @@ check('汇编含 M8 章节', highlights.includes('M8 联调'))
 check('汇编已修过期数字（35 条）',
   highlights.includes('检查清单 35 条') && !highlights.includes('检查清单 19 条'))
 
+// ★★ 交叉检查：README 里引用的条数必须与手册**实际条数**一致 ——
+//    否则手册每加一条，README 上的数字就悄悄过期（M8-4a 当场撞到过：写完 §四 36 条，
+//    README 还写着 35 条）。数字类引用一律**算出来**，不要靠记得改。
+const n3 = (manual.match(/^### 3\.\d+ /gm) || []).length
+const sec4 = (manual.split('## 四、')[1] || '').split('## 五、')[0]
+const n4 = (sec4.match(/^\| \d+ \|/gm) || []).length
+check('README 引用的手册条数与实际一致（§三 ' + n3 + ' / §四 ' + n4 + '）',
+  rm.includes('§三 ' + n3 + ' 条') && rm.includes('§四验收清单 ' + n4 + ' 条'),
+  'README 写的是：' + ((rm.match(/§三 \d+ 条真实故障 \+ §四验收清单 \d+ 条/) || ['(未找到)'])[0]))
+
 // ================================================================
 section('5. 工作区状态')
 
