@@ -88,7 +88,88 @@ function redis(...args) {
   return (r.stdout || '').trim();
 }
 
-async function call(method, path, { body, token, retryOn401 = true } = {}) {
+/** ==========================================================================
+ * ★★ 管理端调用自动改用「管理员」token —— #A9 收尾（2026-09-21）
+ *
+ * 背景：**管理端接口**（建课/改课/上下架/删课/题目/建券/发券/媒资列表与删除/评分…）
+ *       现在都要求**管理员**（UserType=1）。以前它们只要求「已登录」，所以本脚本一直用
+ *       **学员** token 调它们 —— 那个越权漏洞就是 docs/待修复问题清单.md 里的 #A9。
+ *
+ * ★★ 为什么是**管理员**、而不是教练：`UserType` 是 ADMIN(1) / STUDENT(2) / COACH(3)，
+ *      而 SDK 的 AdminAuthInterceptor 只认 ADMIN —— **实测教练 token 一样会被 403**。
+ *      这与 `/ts/admin`、`/es/admin` 等其余管理端接口一致（它们同样只认管理员）。
+ *      （"教练建题"在本项目里从来不是一条**权限**，只是 #A9 无校验时的副作用。）
+ *
+ * 做法：原实现改名 `callRaw`，`call` 变成一层薄包装 ——
+ *       **路径命中管理端清单时**，把调用方的 token 换成管理员 token。
+ *
+ * ★ 两个刻意的边界：
+ *   ① 调用方**没带 token**（如「未登录应 401」的用例）**不替换** ——
+ *      否则会把 401 断言测成 200，变成假绿。
+ *   ② 管理员 token **惰性获取**：各脚本里 staff 登录的位置不一致（有的要到文件后半段
+ *      才登录），惰性获取让这层包装对**所有**脚本完全一致，也不必挪动原有代码。
+ *
+ * ★★ 清单必须覆盖**所有服务**，不只 fm-course：#A9 是分两次收口的 ——
+ *    M7-9 给 fm-media / fm-promotion / fm-exam 开了鉴权，但**没有同步改脚本**，
+ *    于是 accept-m2-1（媒资列表/删除）与 accept-m4-3（建券/发券）从那天起一直在 403，
+ *    直到 M7-11 跑全量回归才暴露。所以这里**一次性列全**。
+ * ========================================================================== */
+let _adminToken = null
+/**
+ * 管理端路径清单 —— 与各服务 `application.yml` 的 `fm.auth.resource.admin.pathPatterns` 对齐：
+ *   · fm-trade / fm-data / fm-aigc / fm-message / fm-learning / fm-exam → 默认 `/admin/**`
+ *   · fm-media     → `/medias`（含 GET 列表与 DELETE）、`/medias/{id}/preview-url`、`DELETE /medias/{id}`
+ *                    ★ `/files/**` **刻意不圈**：它是通用文件服务（bizType 含 avatar 等学员用途）
+ *   · fm-promotion → `/coupons/**`、`/exchange-codes/**`
+ *   · fm-course    → 见下面逐条（用 `METHOD:/path`：同前缀里混着学员端读接口）
+ */
+function isAdminPath(method, path) {
+  // 去掉网关前缀（/cs、/ms、/prs、/es…），还原成服务内部看到的路径
+  const p = String(path || '').split('?')[0]
+    .replace(/^\/(as|us|ms|cs|ss|ls|rs|ts|ps|prs|sms|es|ds|ais)(?=\/)/, '');
+  const m = String(method || 'GET').toUpperCase();
+  // ① 通用：所有服务的 /admin/** 都是管理端
+  if (p === '/admin' || p.startsWith('/admin/')) return true;
+  // ② fm-media（★ 刻意不圈：upload-signature / */confirm / **/files/** —— 学员也在用）
+  if (p === '/medias') return true;
+  if (p.startsWith('/medias/') && p.endsWith('/preview-url')) return true;
+  if (m === 'DELETE' && p.startsWith('/medias/')) return true;
+  // ③ fm-promotion（★ /user-coupons/** 与 /internal/** 是学员端在用，不在其中）
+  if (p === '/coupons' || p.startsWith('/coupons/')) return true;
+  if (p.startsWith('/exchange-codes/')) return true;
+  // ④ fm-course
+  if (p === '/courses/baseInfo/save') return m === 'POST';
+  if (p.startsWith('/courses/catas/save/')) return m === 'POST';
+  if (p.startsWith('/courses/media/save/')) return m === 'POST';
+  if (p === '/courses/teachers/save') return m === 'POST';
+  if (p === '/courses/upShelf' || p === '/courses/downShelf') return m === 'POST';
+  if (p.startsWith('/courses/delete/')) return m === 'DELETE';
+  if (p === '/courses/page' || p === '/courses/checkName') return m === 'GET';
+  if (p.startsWith('/courses/checkBeforeUpShelf/')) return m === 'GET';
+  if (p.startsWith('/courses/catas/')) return m === 'GET';
+  if (p.startsWith('/subjects')) return true;
+  if (p.startsWith('/courses/subjects/')) return true;
+  if (p === '/categorys/add') return m === 'POST';
+  if (p === '/categorys/update' || p === '/categorys/disableOrEnable') return m === 'PUT';
+  return p.startsWith('/categorys/') && m === 'DELETE';
+}
+async function call(method, path, opts = {}) {
+  // ★ `noAdminSwap: true` 用于**故意用非管理员 token 探测 403** 的负向用例 ——
+  //   不加这个开关就会把"应 403"换成管理员 token 测成 200，
+  //   把安全断言变成永远失败（实测回归里踩到过）。
+  if (opts && opts.token && !opts.noAdminSwap && isAdminPath(method, path)) {
+    if (!_adminToken) {
+      const r = await callRaw('POST', '/as/accounts/admin/login', {
+        body: { type: 1, cellPhone: '13800010003', password: '123456', rememberMe: false },
+      });
+      _adminToken = r.json?.data;
+      if (!_adminToken) throw new Error('管理员登录失败（管理端调用需要 UserType=1）：' + JSON.stringify(r.json));
+    }
+    opts = { ...opts, token: _adminToken };
+  }
+  return callRaw(method, path, opts);
+}
+async function callRaw(method, path, { body, token, retryOn401 = true } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = token;
   const doFetch = async () => {
@@ -199,11 +280,23 @@ async function buildCourse({ token, name, suffix, free = 2, price = 19900 }) {
   return { courseId, sectionIds, cateId: cate.id };
 }
 
+/**
+ * ★ 本次运行**自己创建的订单 id** —— 收尾自检必须用它，不能用时间窗。
+ *
+ *   原来自检写的是「本用户 2 小时内的退款申请」（时间窗口径），会**误伤**：
+ *   只要 2 小时内**别的脚本**（前端 m7-8 的退款审批、m7-3 的退款流程）也跑过，
+ *   它们留下的数据就被算成「本次清理失败」。实测踩到过：手动跑一次 m7-8 之后，
+ *   m4-4 报 `leftover=1`，而那条根本不是它产生的。
+ * ★ 自检要回答的是「**这次**的清理动作成功了没有」，所以判据必须是**自己的 id**。
+ */
+const CREATED_ORDERS = []
+
 /** 下单：预下单拿 orderId → 提交订单 */
 async function placeOrder(token, courseIds) {
   const pre = await call('GET', `/ts/orders/prePlace?courseIds=${courseIds.join(',')}`, { token });
   const orderId = pre.json?.data?.orderId;
   if (!orderId) return { pre, error: 'prePlace 没有返回 orderId' };
+  CREATED_ORDERS.push(String(orderId))
   const place = await call('POST', '/ts/orders', { token, body: { orderId, courseIds } });
   return { orderId, pre, place };
 }
@@ -601,7 +694,8 @@ async function main() {
   // ==================== 10. 越权 ====================
   section('10. ★ 管理端越权防护');
   const student2Approve = await call('PUT', '/ts/admin/refund-apply/approval', {
-    token, body: { id: apply3Id, approveType: 1, approveOpinion: '我是学员我想批自己' },
+    token, noAdminSwap: true,
+    body: { id: apply3Id, approveType: 1, approveOpinion: '我是学员我想批自己' },
   });
   check('学员调审批接口 → 403（不是 200）',
     student2Approve.status === 403 || student2Approve.json?.code === 403,
@@ -612,7 +706,8 @@ async function main() {
   check('未登录调审批接口 → 401', noAuth.status === 401 || noAuth.json?.code === 401,
     `status=${noAuth.status}, code=${noAuth.json?.code}`);
   const student2Publish = await call('POST', '/sms/admin/public-notices', {
-    token, body: { title: '越权公告', content: '我不该能发' },
+    token, noAdminSwap: true,
+    body: { title: '越权公告', content: '我不该能发' },
   });
   check('学员调发公告接口 → 403',
     student2Publish.status === 403 || student2Publish.json?.code === 403,
@@ -644,8 +739,15 @@ async function main() {
   check('收尾自检：课程无残留（DB）', leftoverCourse === '0', `leftover=${leftoverCourse}`);
   const leftoverOrder = sql("SELECT COUNT(*) FROM fm_trade.trade_order WHERE user_id=1 AND create_time > NOW() - INTERVAL 2 HOUR");
   check('收尾自检：订单无残留', leftoverOrder === '0', `leftover=${leftoverOrder}`);
-  const leftoverApply = sql("SELECT COUNT(*) FROM fm_trade.refund_apply");
-  check('收尾自检：退款申请无残留', leftoverApply === '0', `leftover=${leftoverApply}`);
+  // ★★ 判据用**本次运行自己创建的订单**（`CREATED_ORDERS`），不用时间窗。
+  //   演进过三版，每版都被现实打回一次，记在这儿：
+  //     ① 整表 `COUNT(*) FROM refund_apply` → 历史验收产物让它**常红**；
+  //     ② 「本用户 2 小时内」→ 2 小时内**别的脚本**（m7-8 的退款审批 / m7-3 的退款）跑过就**误伤**；
+  //     ③ 自己的订单 id（现在这版）→ 不受时间与别的脚本影响，**且真能验出"我的清理失败了没有"**。
+  const ownOrderList = CREATED_ORDERS.length ? CREATED_ORDERS.join(',') : '0';
+  const leftoverApply = sql(`SELECT COUNT(*) FROM fm_trade.refund_apply WHERE order_id IN (${ownOrderList})`);
+  check('收尾自检：本次运行的退款申请无残留', leftoverApply === '0',
+    `leftover=${leftoverApply}（本次共创建 ${CREATED_ORDERS.length} 笔订单）`);
   const leftoverNotice = sql("SELECT COUNT(*) FROM fm_message.public_notice");
   check('收尾自检：公告无残留', leftoverNotice === '0', `leftover=${leftoverNotice}`);
 
@@ -661,6 +763,17 @@ function cleanup() {
     `DELETE FROM fm_message.sms_record WHERE user_id=1 AND create_time > NOW() - INTERVAL 2 HOUR`,
     `DELETE FROM fm_message.public_notice WHERE push_time > NOW() - INTERVAL 2 HOUR`,
     `DELETE FROM fm_trade.refund_apply WHERE order_id IN (${orderIdList})`,
+    // ★ 兜底：清掉**孤儿**退款申请（订单已不存在）。
+    //   上面那条按「订单 id 列表」删，只能删掉**订单还在**的那些；
+    //   一旦订单先被别的脚本清掉、退款申请留下，就永远删不到了 ——
+    //   库里实测攒了 8 条（9-18 与今天凌晨的验收产物 + 手动跑 m7-8 那次）。
+    //   这类孤儿记录会污染后续断言（"整表为 0"这种口径直接失效），顺手清掉。
+    //
+    //   ⚠️ 写法必须是「单表 + 全限定名」，**不要**用多表形式
+    //      `DELETE r FROM fm_trade.refund_apply r WHERE ...`：
+    //      后者要求连接先选库，否则报 `ERROR 1046 (3D000) No database selected`
+    //      （本脚本的 mysql 调用**不带库名**，全靠语句里的全限定名定位）—— 实测踩到。
+    `DELETE FROM fm_trade.refund_apply WHERE user_id=1 AND order_id NOT IN (SELECT id FROM fm_trade.trade_order)`,
     `DELETE FROM fm_trade.trade_order_detail WHERE order_id IN (${orderIdList})`,
     `DELETE FROM fm_trade.trade_order WHERE id IN (${orderIdList})`,
     `DELETE FROM fm_learning.learning_lesson WHERE user_id=1 AND create_time > NOW() - INTERVAL 2 HOUR`,

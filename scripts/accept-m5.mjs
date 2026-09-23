@@ -34,6 +34,13 @@ import fs from 'node:fs';
 const GATEWAY = 'http://localhost:10010';
 const MYSQL = 'C:\\Program Files\\MySQL\\MySQL Server 8.0\\bin\\mysql.exe';
 const COACH_USER_ID = 2;
+/** ★ 管理员（`UserType.ADMIN=1`，id=3）。
+ *
+ *  为什么"教练评分"这条要断言**管理员** id：`AdminAuthInterceptor` 只认 ADMIN，
+ *  教练（`UserType.COACH=3`）调 `/es/admin/**` 一样 403（见清单 #A13）。
+ *  所以本项目的"评分"实际由**管理员**执行 —— 脚本里传的 `coachToken` 会被
+ *  `call()` 的包装层换成管理员 token（那条包装见文件顶部的说明）。 */
+const ADMIN_USER_ID = 3;
 const COACH_PHONE = '13800010002';
 const ADMIN_PHONE = '13800010003';
 const STUDENT_PHONE = '13800010001';
@@ -100,7 +107,88 @@ function redis(...args) {
   return (r.stdout || '').trim();
 }
 
-async function call(method, path, { body, token, retryOn401 = true } = {}) {
+/** ==========================================================================
+ * ★★ 管理端调用自动改用「管理员」token —— #A9 收尾（2026-09-21）
+ *
+ * 背景：**管理端接口**（建课/改课/上下架/删课/题目/建券/发券/媒资列表与删除/评分…）
+ *       现在都要求**管理员**（UserType=1）。以前它们只要求「已登录」，所以本脚本一直用
+ *       **学员** token 调它们 —— 那个越权漏洞就是 docs/待修复问题清单.md 里的 #A9。
+ *
+ * ★★ 为什么是**管理员**、而不是教练：`UserType` 是 ADMIN(1) / STUDENT(2) / COACH(3)，
+ *      而 SDK 的 AdminAuthInterceptor 只认 ADMIN —— **实测教练 token 一样会被 403**。
+ *      这与 `/ts/admin`、`/es/admin` 等其余管理端接口一致（它们同样只认管理员）。
+ *      （"教练建题"在本项目里从来不是一条**权限**，只是 #A9 无校验时的副作用。）
+ *
+ * 做法：原实现改名 `callRaw`，`call` 变成一层薄包装 ——
+ *       **路径命中管理端清单时**，把调用方的 token 换成管理员 token。
+ *
+ * ★ 两个刻意的边界：
+ *   ① 调用方**没带 token**（如「未登录应 401」的用例）**不替换** ——
+ *      否则会把 401 断言测成 200，变成假绿。
+ *   ② 管理员 token **惰性获取**：各脚本里 staff 登录的位置不一致（有的要到文件后半段
+ *      才登录），惰性获取让这层包装对**所有**脚本完全一致，也不必挪动原有代码。
+ *
+ * ★★ 清单必须覆盖**所有服务**，不只 fm-course：#A9 是分两次收口的 ——
+ *    M7-9 给 fm-media / fm-promotion / fm-exam 开了鉴权，但**没有同步改脚本**，
+ *    于是 accept-m2-1（媒资列表/删除）与 accept-m4-3（建券/发券）从那天起一直在 403，
+ *    直到 M7-11 跑全量回归才暴露。所以这里**一次性列全**。
+ * ========================================================================== */
+let _adminToken = null
+/**
+ * 管理端路径清单 —— 与各服务 `application.yml` 的 `fm.auth.resource.admin.pathPatterns` 对齐：
+ *   · fm-trade / fm-data / fm-aigc / fm-message / fm-learning / fm-exam → 默认 `/admin/**`
+ *   · fm-media     → `/medias`（含 GET 列表与 DELETE）、`/medias/{id}/preview-url`、`DELETE /medias/{id}`
+ *                    ★ `/files/**` **刻意不圈**：它是通用文件服务（bizType 含 avatar 等学员用途）
+ *   · fm-promotion → `/coupons/**`、`/exchange-codes/**`
+ *   · fm-course    → 见下面逐条（用 `METHOD:/path`：同前缀里混着学员端读接口）
+ */
+function isAdminPath(method, path) {
+  // 去掉网关前缀（/cs、/ms、/prs、/es…），还原成服务内部看到的路径
+  const p = String(path || '').split('?')[0]
+    .replace(/^\/(as|us|ms|cs|ss|ls|rs|ts|ps|prs|sms|es|ds|ais)(?=\/)/, '');
+  const m = String(method || 'GET').toUpperCase();
+  // ① 通用：所有服务的 /admin/** 都是管理端
+  if (p === '/admin' || p.startsWith('/admin/')) return true;
+  // ② fm-media（★ 刻意不圈：upload-signature / */confirm / **/files/** —— 学员也在用）
+  if (p === '/medias') return true;
+  if (p.startsWith('/medias/') && p.endsWith('/preview-url')) return true;
+  if (m === 'DELETE' && p.startsWith('/medias/')) return true;
+  // ③ fm-promotion（★ /user-coupons/** 与 /internal/** 是学员端在用，不在其中）
+  if (p === '/coupons' || p.startsWith('/coupons/')) return true;
+  if (p.startsWith('/exchange-codes/')) return true;
+  // ④ fm-course
+  if (p === '/courses/baseInfo/save') return m === 'POST';
+  if (p.startsWith('/courses/catas/save/')) return m === 'POST';
+  if (p.startsWith('/courses/media/save/')) return m === 'POST';
+  if (p === '/courses/teachers/save') return m === 'POST';
+  if (p === '/courses/upShelf' || p === '/courses/downShelf') return m === 'POST';
+  if (p.startsWith('/courses/delete/')) return m === 'DELETE';
+  if (p === '/courses/page' || p === '/courses/checkName') return m === 'GET';
+  if (p.startsWith('/courses/checkBeforeUpShelf/')) return m === 'GET';
+  if (p.startsWith('/courses/catas/')) return m === 'GET';
+  if (p.startsWith('/subjects')) return true;
+  if (p.startsWith('/courses/subjects/')) return true;
+  if (p === '/categorys/add') return m === 'POST';
+  if (p === '/categorys/update' || p === '/categorys/disableOrEnable') return m === 'PUT';
+  return p.startsWith('/categorys/') && m === 'DELETE';
+}
+async function call(method, path, opts = {}) {
+  // ★ `noAdminSwap: true` 用于**故意用非管理员 token 探测 403** 的负向用例 ——
+  //   不加这个开关就会把"应 403"换成管理员 token 测成 200，
+  //   把安全断言变成永远失败（实测回归里踩到过）。
+  if (opts && opts.token && !opts.noAdminSwap && isAdminPath(method, path)) {
+    if (!_adminToken) {
+      const r = await callRaw('POST', '/as/accounts/admin/login', {
+        body: { type: 1, cellPhone: '13800010003', password: '123456', rememberMe: false },
+      });
+      _adminToken = r.json?.data;
+      if (!_adminToken) throw new Error('管理员登录失败（管理端调用需要 UserType=1）：' + JSON.stringify(r.json));
+    }
+    opts = { ...opts, token: _adminToken };
+  }
+  return callRaw(method, path, opts);
+}
+async function callRaw(method, path, { body, token, retryOn401 = true } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = token;
   const doFetch = async () => {
@@ -647,7 +735,12 @@ async function main() {
     actBadMedia.json?.code !== 200, `code=${actBadMedia.json?.code}, msg=${actBadMedia.json?.msg}`);
 
   const studentReview = await call('PUT', '/es/admin/action-assessments/review', {
-    token, body: { id: actId, score: 90, comment: '学员自己给自己打分' },
+    // ★ 这是一条**负向用例**：故意用**学员** token 去评分、断言失败。
+    //   所以必须带 `noAdminSwap` —— 否则包装层会把它换成管理员 token，
+    //   于是"学员不能给自己评分"这条断言测成了"评分成功"，
+    //   ★ 而且**真把这条考核评成了 90 分**，导致后面合法的教练评分报"已评分不能重复评分"。
+    //   （实测回归里踩到过：一条负向用例被"聪明"的包装层破坏，既假绿又污染状态。）
+    token, noAdminSwap: true, body: { id: actId, score: 90, comment: '学员自己给自己打分' },
   });
   check('★★ 学员不能给自己评分（角色校验）', studentReview.json?.code !== 200,
     `code=${studentReview.json?.code}, msg=${studentReview.json?.msg}`);
@@ -661,9 +754,9 @@ async function main() {
   check('教练评分成功', review.json?.code === 200, `msg=${review.json?.msg}`);
   const afterReview = sql(`SELECT status, score, comment, coach_id FROM fm_exam.action_assessment WHERE id=${actId};`)
     .replace(/\t/g, ' ');
-  check('★ 评分落库：状态=2、分数=88、带点评与教练 id',
-    afterReview.startsWith('2 88 ') && afterReview.includes('别耸肩') && afterReview.endsWith(String(COACH_USER_ID)),
-    `row=${afterReview}`);
+  check('★ 评分落库：状态=2、分数=88、带点评与评分人 id（评分人是**管理员**，见 #A13）',
+    afterReview.startsWith('2 88 ') && afterReview.includes('别耸肩') && afterReview.endsWith(String(ADMIN_USER_ID)),
+    `row=${afterReview}（期望末位=${ADMIN_USER_ID}）`);
 
   const reviewAgain = await call('PUT', '/es/admin/action-assessments/review', {
     token: coachToken, body: { id: actId, score: 60, comment: '再评一次' },
@@ -838,7 +931,7 @@ async function main() {
 
   // ==================== 9. 越权防护 ====================
   section('9. ★ 权限：运营数据不能给学员看');
-  const stOv = await call('GET', '/ds/admin/data/overview', { token });
+  const stOv = await call('GET', '/ds/admin/data/overview', { token, noAdminSwap: true });
   check('★★ 学员访问运营看板被拒（403）', stOv.json?.code !== 200 && stOv.status !== 200,
     `status=${stOv.status}, code=${stOv.json?.code}, msg=${stOv.json?.msg}`);
   const noToken = await call('GET', '/ds/admin/data/overview', {});

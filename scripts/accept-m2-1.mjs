@@ -42,7 +42,79 @@ function section(title) {
 }
 
 /** 调网关接口（返回统一响应 R） */
-async function call(method, path, { body, token, json = true } = {}) {
+/**
+ * ★★ 管理端调用自动改用「管理员」token —— #A9 收尾（2026-09-21）
+ *
+ * 背景：**管理端接口**（建课/改课/上下架/删课/题目/建券/发券/媒资列表与删除/评分…）
+ *       现在都要求**管理员**（UserType=1）。以前它们只要求「已登录」，所以本脚本一直用
+ *       **学员** token 调它们 —— 那个越权漏洞就是 docs/待修复问题清单.md 里的 #A9。
+ *
+ *   ② 管理员 token **惰性获取**：各脚本里 staff 登录的位置不一致（有的要到文件后半段
+ *      才登录），惰性获取让这层包装对**所有**脚本完全一致，也不必挪动原有代码。
+ *
+ * ★★ 清单必须覆盖**所有服务**，不只 fm-course：#A9 是分两次收口的 ——
+ *    M7-9 给 fm-media / fm-promotion / fm-exam 开了鉴权，但**没有同步改脚本**，
+ *    于是 accept-m2-1（媒资列表/删除）与 accept-m4-3（建券/发券）从那天起一直在 403，
+ *    直到 M7-11 跑全量回归才暴露。所以这里**一次性列全**。
+ */
+
+let _adminToken = null
+/**
+ * 管理端路径清单 —— 与各服务 `application.yml` 的 `fm.auth.resource.admin.pathPatterns` 对齐：
+ *   · fm-trade / fm-data / fm-aigc / fm-message / fm-learning / fm-exam → 默认 `/admin/**`
+ *   · fm-media     → `/medias`（含 GET 列表与 DELETE）、`/medias/{id}/preview-url`、`DELETE /medias/{id}`
+ *                    ★ `/files/**` **刻意不圈**：它是通用文件服务（bizType 含 avatar 等学员用途）
+ *   · fm-promotion → `/coupons/**`、`/exchange-codes/**`
+ *   · fm-course    → 见下面逐条（用 `METHOD:/path`：同前缀里混着学员端读接口）
+ */
+function isAdminPath(method, path) {
+  // 去掉网关前缀（/cs、/ms、/prs、/es…），还原成服务内部看到的路径
+  const p = String(path || '').split('?')[0]
+    .replace(/^\/(as|us|ms|cs|ss|ls|rs|ts|ps|prs|sms|es|ds|ais)(?=\/)/, '');
+  const m = String(method || 'GET').toUpperCase();
+  // ① 通用：所有服务的 /admin/** 都是管理端
+  if (p === '/admin' || p.startsWith('/admin/')) return true;
+  // ② fm-media（★ 刻意不圈：upload-signature / */confirm / **/files/** —— 学员也在用）
+  if (p === '/medias') return true;
+  if (p.startsWith('/medias/') && p.endsWith('/preview-url')) return true;
+  if (m === 'DELETE' && p.startsWith('/medias/')) return true;
+  // ③ fm-promotion（★ /user-coupons/** 与 /internal/** 是学员端在用，不在其中）
+  if (p === '/coupons' || p.startsWith('/coupons/')) return true;
+  if (p.startsWith('/exchange-codes/')) return true;
+  // ④ fm-course
+  if (p === '/courses/baseInfo/save') return m === 'POST';
+  if (p.startsWith('/courses/catas/save/')) return m === 'POST';
+  if (p.startsWith('/courses/media/save/')) return m === 'POST';
+  if (p === '/courses/teachers/save') return m === 'POST';
+  if (p === '/courses/upShelf' || p === '/courses/downShelf') return m === 'POST';
+  if (p.startsWith('/courses/delete/')) return m === 'DELETE';
+  if (p === '/courses/page' || p === '/courses/checkName') return m === 'GET';
+  if (p.startsWith('/courses/checkBeforeUpShelf/')) return m === 'GET';
+  if (p.startsWith('/courses/catas/')) return m === 'GET';
+  if (p.startsWith('/subjects')) return true;
+  if (p.startsWith('/courses/subjects/')) return true;
+  if (p === '/categorys/add') return m === 'POST';
+  if (p === '/categorys/update' || p === '/categorys/disableOrEnable') return m === 'PUT';
+  return p.startsWith('/categorys/') && m === 'DELETE';
+}
+
+async function call(method, path, opts = {}) {
+  // ★ `noAdminSwap: true` 用于**故意用非管理员 token 探测 403** 的负向用例 ——
+  //   不加这个开关就会把"应 403"换成管理员 token 测成 200，
+  //   把安全断言变成永远失败（实测回归里踩到过）。
+  if (opts && opts.token && !opts.noAdminSwap && isAdminPath(method, path)) {
+    if (!_adminToken) {
+      const r = await callRaw('POST', '/as/accounts/admin/login', {
+        body: { type: 1, cellPhone: '13800010003', password: '123456', rememberMe: false },
+      });
+      _adminToken = r.json?.data;
+      if (!_adminToken) throw new Error('管理员登录失败（管理端调用需要 UserType=1）：' + JSON.stringify(r.json));
+    }
+    opts = { ...opts, token: _adminToken };
+  }
+  return callRaw(method, path, opts);
+}
+async function callRaw(method, path, { body, token, json = true } = {}) {
   const headers = {};
   if (json) headers['Content-Type'] = 'application/json';
   if (token) headers['Authorization'] = token;
@@ -177,10 +249,25 @@ async function main() {
     dlRes?.status === 200 && dlBuf.equals(videoBytes),
     `status=${dlRes?.status}, bytes=${dlBuf.length}/${videoBytes.length}`);
 
-  // 无签名直访应被拒（证明 bucket 是私有的）
+  // ★★ 无签名直访**视频**：必须被拒（403）
+  //
+  // 这条断言的历史值得记一笔（**它差点变成一个"把漏洞改回来"的陷阱**）：
+  //   · 最初断言 `403`（bucket 私有）；
+  //   · M7-2 时为了演示改成 `200` —— 因为课程封面是浏览器**直链**拉 MinIO 的，
+  //     桶一私就全挂，于是把整个 bucket 开了匿名只读（清单 #B3）；
+  //   · 但那同时意味着**付费视频能绕过签名直接下载**（去掉 `?X-Amz-Signature` 即可）。
+  //   · M8-1 把策略**收窄**为「5 个展示类前缀 + media/ 下的图片扩展名」：
+  //       - media/ 下的 **mp4** → 403（= 本条约验的）
+  //       - media/ 下的 **图片**（封面）→ 仍可匿名读（否则封面会挂）
+  //   → 所以断言改回 `403`。
+  //
+  // ⚠️ **看到这条红了，不要"按断言把桶改回公开"** —— 那是在重新打开 #B3。
+  //    正确的排查顺序：① 桶策略是不是又被整体放开了（跑 `scripts/setup-minio-anonymous.py --show`）；
+  //    ② 这个对象是不是**图片**（图片本就该 200，那就说明对象选错了）。
   const rawUrl = `${MINIO}/${BUCKET}/${sigRes.json?.data?.key}`;
   const rawRes = await fetch(rawUrl).catch(() => null);
-  check('不带签名直接访问被拒绝', rawRes?.status === 403, `status=${rawRes?.status}`);
+  check('★★ 无签名直访**视频**被拒绝 403（M8-1 已收窄匿名读，见 #B3）',
+    rawRes?.status === 403, `status=${rawRes?.status}（若是 200，说明桶又被整体开放了）`);
 
   // ==================== 6. 列表与分页 ====================
   section('6. 媒资分页查询');

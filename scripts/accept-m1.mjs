@@ -10,7 +10,36 @@
  * ============================================================
  */
 
+import { spawnSync } from 'node:child_process';
+
 const GATEWAY = 'http://localhost:10010';
+/** ⚠️ 本机 mysql 是完整路径（不在 PATH 里）—— 与其它脚本保持一致 */
+const MYSQL = 'C:////Program Files\\MySQL\\MySQL Server 8.0\\bin\\mysql.exe';
+
+/** 查询：失败即抛（★ 静默返回空串会让"期望为空"的断言假通过） */
+function sql(query) {
+  const r = spawnSync(
+    MYSQL,
+    ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query],
+    { encoding: 'utf8' },
+  );
+  if (r.error) throw new Error(`SQL 执行失败（进程无法启动）：${query}\n${r.error.message}`);
+  if (r.status !== 0) throw new Error(`SQL 执行失败（退出码 ${r.status}）：${query}\n${(r.stderr || '').trim()}`);
+  return (r.stdout || '').trim();
+}
+
+/** 容忍失败的查询：只用于**清理**动作（失败不中断），清理完必须用 sql() 自检 */
+function sqlSoft(query) {
+  try {
+    spawnSync(
+      MYSQL,
+      ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query],
+      { encoding: 'utf8' },
+    );
+  } catch {
+    /* 清理失败不中断 —— 后面会用 sql() 自检 */
+  }
+}
 
 let passed = 0;
 let failed = 0;
@@ -168,6 +197,25 @@ async function main() {
       loginOk = l2.json?.code === 200;
     }
     check('新注册学员可登录', loginOk);
+
+    // ---------- 7.1 清理：把本次注册的账号删掉 ----------
+    // ★ 这一段是**后来补的**：这个用例原本"注册完就结束"，于是
+    //   **全量回归每跑一轮就多留一个账号**（实测 M8-2a 的两轮回归留下了 id=31/32，
+    //   见《待修复问题清单》#B7）。验收自己造的数据要自己收干净 ——
+    //   否则跑得越多库越脏，而且很难看出是谁留下的。
+    sqlSoft(`DELETE FROM fm_auth.login_record WHERE cell_phone='${NEW_PHONE}'`);
+    const newUserId = sql(`SELECT id FROM fm_user.user WHERE cell_phone='${NEW_PHONE}'`);
+    if (newUserId) {
+      sqlSoft(`DELETE FROM fm_user.user_detail WHERE id=${newUserId}`);
+      sqlSoft(`DELETE FROM fm_user.user WHERE id=${newUserId}`);
+    }
+    // ★ 清理必须自检：sqlSoft 吞失败，不自检就等于把失败藏起来了
+    check('★ 清理：本次注册的账号已删除（不给后续回归留垃圾）',
+      sql(`SELECT COUNT(*) FROM fm_user.user WHERE cell_phone='${NEW_PHONE}'`) === '0',
+      `残留=${sql(`SELECT COUNT(*) FROM fm_user.user WHERE cell_phone='${NEW_PHONE}'`)}`);
+    check('★ 清理自检：登录流水也清了',
+      sql(`SELECT COUNT(*) FROM fm_auth.login_record WHERE cell_phone='${NEW_PHONE}'`) === '0',
+      `残留=${sql(`SELECT COUNT(*) FROM fm_auth.login_record WHERE cell_phone='${NEW_PHONE}'`)}`);
   }
 
   // ---------- 8. 密码登录通道 ----------

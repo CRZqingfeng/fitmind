@@ -50,7 +50,88 @@ function section(title) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function call(method, path, { body, token, local } = {}) {
+/** ==========================================================================
+ * ★★ 管理端调用自动改用「管理员」token —— #A9 收尾（2026-09-21）
+ *
+ * 背景：**管理端接口**（建课/改课/上下架/删课/题目/建券/发券/媒资列表与删除/评分…）
+ *       现在都要求**管理员**（UserType=1）。以前它们只要求「已登录」，所以本脚本一直用
+ *       **学员** token 调它们 —— 那个越权漏洞就是 docs/待修复问题清单.md 里的 #A9。
+ *
+ * ★★ 为什么是**管理员**、而不是教练：`UserType` 是 ADMIN(1) / STUDENT(2) / COACH(3)，
+ *      而 SDK 的 AdminAuthInterceptor 只认 ADMIN —— **实测教练 token 一样会被 403**。
+ *      这与 `/ts/admin`、`/es/admin` 等其余管理端接口一致（它们同样只认管理员）。
+ *      （"教练建题"在本项目里从来不是一条**权限**，只是 #A9 无校验时的副作用。）
+ *
+ * 做法：原实现改名 `callRaw`，`call` 变成一层薄包装 ——
+ *       **路径命中管理端清单时**，把调用方的 token 换成管理员 token。
+ *
+ * ★ 两个刻意的边界：
+ *   ① 调用方**没带 token**（如「未登录应 401」的用例）**不替换** ——
+ *      否则会把 401 断言测成 200，变成假绿。
+ *   ② 管理员 token **惰性获取**：各脚本里 staff 登录的位置不一致（有的要到文件后半段
+ *      才登录），惰性获取让这层包装对**所有**脚本完全一致，也不必挪动原有代码。
+ *
+ * ★★ 清单必须覆盖**所有服务**，不只 fm-course：#A9 是分两次收口的 ——
+ *    M7-9 给 fm-media / fm-promotion / fm-exam 开了鉴权，但**没有同步改脚本**，
+ *    于是 accept-m2-1（媒资列表/删除）与 accept-m4-3（建券/发券）从那天起一直在 403，
+ *    直到 M7-11 跑全量回归才暴露。所以这里**一次性列全**。
+ * ========================================================================== */
+let _adminToken = null
+/**
+ * 管理端路径清单 —— 与各服务 `application.yml` 的 `fm.auth.resource.admin.pathPatterns` 对齐：
+ *   · fm-trade / fm-data / fm-aigc / fm-message / fm-learning / fm-exam → 默认 `/admin/**`
+ *   · fm-media     → `/medias`（含 GET 列表与 DELETE）、`/medias/{id}/preview-url`、`DELETE /medias/{id}`
+ *                    ★ `/files/**` **刻意不圈**：它是通用文件服务（bizType 含 avatar 等学员用途）
+ *   · fm-promotion → `/coupons/**`、`/exchange-codes/**`
+ *   · fm-course    → 见下面逐条（用 `METHOD:/path`：同前缀里混着学员端读接口）
+ */
+function isAdminPath(method, path) {
+  // 去掉网关前缀（/cs、/ms、/prs、/es…），还原成服务内部看到的路径
+  const p = String(path || '').split('?')[0]
+    .replace(/^\/(as|us|ms|cs|ss|ls|rs|ts|ps|prs|sms|es|ds|ais)(?=\/)/, '');
+  const m = String(method || 'GET').toUpperCase();
+  // ① 通用：所有服务的 /admin/** 都是管理端
+  if (p === '/admin' || p.startsWith('/admin/')) return true;
+  // ② fm-media（★ 刻意不圈：upload-signature / */confirm / **/files/** —— 学员也在用）
+  if (p === '/medias') return true;
+  if (p.startsWith('/medias/') && p.endsWith('/preview-url')) return true;
+  if (m === 'DELETE' && p.startsWith('/medias/')) return true;
+  // ③ fm-promotion（★ /user-coupons/** 与 /internal/** 是学员端在用，不在其中）
+  if (p === '/coupons' || p.startsWith('/coupons/')) return true;
+  if (p.startsWith('/exchange-codes/')) return true;
+  // ④ fm-course
+  if (p === '/courses/baseInfo/save') return m === 'POST';
+  if (p.startsWith('/courses/catas/save/')) return m === 'POST';
+  if (p.startsWith('/courses/media/save/')) return m === 'POST';
+  if (p === '/courses/teachers/save') return m === 'POST';
+  if (p === '/courses/upShelf' || p === '/courses/downShelf') return m === 'POST';
+  if (p.startsWith('/courses/delete/')) return m === 'DELETE';
+  if (p === '/courses/page' || p === '/courses/checkName') return m === 'GET';
+  if (p.startsWith('/courses/checkBeforeUpShelf/')) return m === 'GET';
+  if (p.startsWith('/courses/catas/')) return m === 'GET';
+  if (p.startsWith('/subjects')) return true;
+  if (p.startsWith('/courses/subjects/')) return true;
+  if (p === '/categorys/add') return m === 'POST';
+  if (p === '/categorys/update' || p === '/categorys/disableOrEnable') return m === 'PUT';
+  return p.startsWith('/categorys/') && m === 'DELETE';
+}
+async function call(method, path, opts = {}) {
+  // ★ `noAdminSwap: true` 用于**故意用非管理员 token 探测 403** 的负向用例 ——
+  //   不加这个开关就会把"应 403"换成管理员 token 测成 200，
+  //   把安全断言变成永远失败（实测回归里踩到过）。
+  if (opts && opts.token && !opts.noAdminSwap && isAdminPath(method, path)) {
+    if (!_adminToken) {
+      const r = await callRaw('POST', '/as/accounts/admin/login', {
+        body: { type: 1, cellPhone: '13800010003', password: '123456', rememberMe: false },
+      });
+      _adminToken = r.json?.data;
+      if (!_adminToken) throw new Error('管理员登录失败（管理端调用需要 UserType=1）：' + JSON.stringify(r.json));
+    }
+    opts = { ...opts, token: _adminToken };
+  }
+  return callRaw(method, path, opts);
+}
+async function callRaw(method, path, { body, token, local } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = token;
   const base = local ? `http://localhost:${local}` : GATEWAY;
@@ -272,9 +353,29 @@ async function main() {
     `msg=${enrollB.json?.msg}`);
   const enrollC = await call('POST', `/ls/lessons/${c.courseId}`, { token });
   check('未上架课程被拒', enrollC.json?.code !== 200, `msg=${enrollC.json?.msg}`);
-  const page1 = await call('GET', '/ls/lessons/page?pageNo=1&pageSize=10', { token });
-  check('我的课程分页含课程A', (page1.json?.data?.list || [])
-    .some((x) => x.courseId === a.courseId), `total=${page1.json?.data?.total}`);
+  /**
+   * ★★ 必须**翻页找**，不能假设"刚报名的课一定在第 1 页"。
+   *
+   *   ⚠️ 实测：演示学员的课程数会随着各脚本不断报名而增长（已到 **12 门 > pageSize 10**），
+   *   于是目标课落到**第 2 页** → 断言报 `我的课程分页含课程A —— total=12`，
+   *   看着像"报名没生效"，其实只是**找错了页**。
+   *   （m7-4 的注释里早就记过同一条：「别假设它一定在第 1 页」—— m3-1 这里漏了。）
+   *
+   *   ★ 与 #C35 同族，本质是**把"数据的当前状态"当成了"实现行为"**：
+   *     数据是多少门、排在哪个位置，都不是实现要保证的事；
+   *     实现保证的是"报名之后这门课**在**我的课程里"。
+   */
+  let lessonsTotal = 0
+  let foundA = false
+  for (let p = 1; p <= 20 && !foundA; p++) {
+    const pg = await call('GET', `/ls/lessons/page?pageNo=${p}&pageSize=10`, { token });
+    const list = pg.json?.data?.list || [];
+    lessonsTotal = pg.json?.data?.total ?? lessonsTotal;
+    if (list.length === 0) break;
+    foundA = list.some((x) => x.courseId === a.courseId);
+  }
+  check('★ 我的课程里能找到课程A（**翻页找**，不假设在第 1 页）', foundA,
+    `total=${lessonsTotal}`);
 
   // ==================== 5. 进度上报：分布式合并 ====================
   section('5. ★ 进度上报：未过半走分布式合并');
@@ -364,13 +465,24 @@ async function main() {
 
   // ==================== 8. 学习计划 ====================
   section('8. 学习计划');
+  // ★★ 先读一次"当前的本周计划总数"，断言**增量 == 4**。
+  //
+  //   原实现写的是 `weekTotalPlan === 4`（硬编码），但它的口径是
+  //   **该学员所有"进行中"计划的 week_freq 之和**（见 LearningPlanPageVO 的注释）——
+  //   脚本每跑一次就多建一门课的计划，于是这个和会从 4 一路累积
+  //   （实测失败时是 22 = 库里已有的 18 + 本次的 4）。
+  //   也就是说：**实现完全正确，断言却会失败**。
+  //   → 这条要测的是"这次建计划带来了多少"，那就在建之前读一次、算差值。
+  const planBefore = (await call('GET', '/ls/lessons/plans?pageNo=1&pageSize=10', { token }))
+    .json?.data?.weekTotalPlan ?? 0;
   const planRes = await call('POST', '/ls/lessons/plans', {
     token, body: { courseId: a.courseId, freq: 4 },
   });
   check('创建学习计划成功', planRes.json?.code === 200, `msg=${planRes.json?.msg}`);
   const plans = await call('GET', '/ls/lessons/plans?pageNo=1&pageSize=10', { token });
-  check('★ 本周计划总数 = 4', plans.json?.data?.weekTotalPlan === 4,
-    `weekTotalPlan=${plans.json?.data?.weekTotalPlan}`);
+  check('★ 本周计划总数 +4（★ 断言增量，不是硬编码值——它会随运行次数累积）',
+    plans.json?.data?.weekTotalPlan === planBefore + 4,
+    `before=${planBefore} after=${plans.json?.data?.weekTotalPlan}`);
   check('★ 本周已练 >= 2（两节本周完成；多次运行会有残留）', plans.json?.data?.weekFinished >= 2,
     `weekFinished=${plans.json?.data?.weekFinished}`);
   check('计划列表含课程A', (plans.json?.data?.list || []).some((x) => x.courseId === a.courseId));
