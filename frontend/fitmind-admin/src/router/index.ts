@@ -55,6 +55,55 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/CourseAdminView.vue'),
         meta: { title: '课程管理' },
       },
+      // ==================== M7-12 第 2 期：建课主线 ====================
+      /**
+       * ★ 建课向导用**两条路由指向同一个组件**：
+       *   `courses/edit`（新建）与 `courses/edit/:id`（继续填已有草稿）。
+       *   组件内部靠"有没有 :id"区分模式（`isEdit`），而不是拆成两个文件 ——
+       *   5 步表单的字段与校验完全一样，拆开只会变成两份要同步维护的代码。
+       *   ★ 两条都 `hideInMenu`：它们是从「课程管理」点进去的，不该占菜单位。
+       */
+      {
+        path: 'courses/edit',
+        name: 'course-edit',
+        component: () => import('@/views/CourseEditView.vue'),
+        meta: { title: '新建课程', hideInMenu: true },
+      },
+      {
+        path: 'courses/edit/:id',
+        name: 'course-edit-id',
+        component: () => import('@/views/CourseEditView.vue'),
+        meta: { title: '编辑课程', hideInMenu: true },
+      },
+      {
+        path: 'categorys',
+        name: 'categorys',
+        component: () => import('@/views/CategoryAdminView.vue'),
+        meta: { title: '分类管理' },
+      },
+      {
+        path: 'subjects',
+        name: 'subjects',
+        component: () => import('@/views/SubjectAdminView.vue'),
+        meta: { title: '题库管理' },
+      },
+      // ==================== M7-12 第 3 期：内容运营 ====================
+      /**
+       * ★ 这两页补上的是 admin 最后缺失的"内容运营"能力 ——
+       *   在此之前管理端只能管"课"，管不了"用户产生的内容"（问答/笔记）和"对外的通知"。
+       */
+      {
+        path: 'community-audit',
+        name: 'community-audit',
+        component: () => import('@/views/CommunityAuditView.vue'),
+        meta: { title: '社区审核' },
+      },
+      {
+        path: 'notices',
+        name: 'notices',
+        component: () => import('@/views/NoticeAdminView.vue'),
+        meta: { title: '公告与模板' },
+      },
       // ==================== M7-10 动作考核 ====================
       {
         path: 'action-assess',

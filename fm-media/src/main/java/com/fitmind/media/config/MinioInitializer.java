@@ -1,12 +1,13 @@
 package com.fitmind.media.config;
 
-import com.fitmind.media.storage.MinioProperties;
+import com.fitmind.media.storage.StorageProperties;
 import io.minio.BucketExistsArgs;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -23,18 +24,22 @@ import org.springframework.stereotype.Component;
  *   <li>minio-java 8.5.12 的 {@code MinioClient} 根本没有暴露设置 CORS 的 API（javap 已确认）</li>
  * </ol>
  * <p>将来部署到生产要收紧来源时，用 {@code mc cors set} 配置即可，不用改代码。</p>
+ *
+ * <p>★ 仅在 {@code fm.storage.type=minio} 时装配。切到 OSS 后不应去连 MinIO ——
+ * 否则启动日志里会刷一片连接失败，把真正的问题盖住。</p>
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
+@ConditionalOnProperty(name = "fm.storage.type", havingValue = "minio", matchIfMissing = true)
 public class MinioInitializer {
 
     private final MinioClient minioClient;
-    private final MinioProperties properties;
+    private final StorageProperties storage;
 
     @PostConstruct
     public void init() {
-        String bucket = properties.getBucket();
+        String bucket = storage.getBucket();
         try {
             boolean exists = minioClient.bucketExists(BucketExistsArgs.builder().bucket(bucket).build());
             if (exists) {

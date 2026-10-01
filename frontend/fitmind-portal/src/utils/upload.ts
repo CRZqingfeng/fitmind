@@ -32,6 +32,18 @@ export interface UploadSignature {
   uploadUrl: string
   /** 签名有效期，单位秒 */
   expire: number
+  /**
+   * ★★ 直传时**必须原样带上**的 Content-Type（M9-1 起）。
+   *
+   * 阿里云 OSS 的 V4 签名把 Content-Type 算进签名，而浏览器直传 `File` 时
+   * 一定会带这个头 —— 一旦与后端签名时用的值不一致，就是
+   * `403 SignatureDoesNotMatch`，报错完全看不出是这个原因。
+   *
+   * 所以值由**后端算好回传**，这里照带即可，别再自己猜。
+   *
+   * ⚠️ MinIO 模式下后端不返回它（`undefined`）—— 那时沿用原有的自猜逻辑，行为不变。
+   */
+  contentType?: string
 }
 
 /**
@@ -83,7 +95,13 @@ export function readVideoDuration(file: File): Promise<number> {
   })
 }
 
-/** PUT 直传到 MinIO（用 XHR 才能拿到上传进度） */
+/**
+ * PUT 直传到对象存储（用 XHR 才能拿到上传进度）。
+ *
+ * ★★ `mime` 的取值来源见 `UploadSignature.contentType` 的说明：
+ *    OSS 模式必须用后端回传的值（V4 把 Content-Type 算进签名），MinIO 模式才自猜。
+ *    调用点写的是 `sig.contentType || file.type || guessMime(file.name)`。
+ */
 export function putToMinio(
   url: string,
   file: File,

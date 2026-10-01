@@ -20,6 +20,15 @@ fm:
       - GET:/as/accounts/admin/refresh
       - POST:/us/codes
       - POST:/us/students/register
+      # ★ 下面两条是**登录前**接口（#A16）：
+      #   requireLoginPath 里的 /us/** 会把它们一起兜进登录墙，但它们天生属于"还没登录"的场景：
+      #     · PUT  /us/students/password   —— 忘记密码：用户正是因为登不进去才要重置
+      #     · GET  /us/users/checkCellphone —— 注册页校验手机号可注册：此时还没有账号
+      #   不放行的话，注册页手机号一失焦就 401 → 全局拦截器判"登录态过期" → 整页跳登录（页面功能直接不可用）
+      #   ⚠️ checkCellphone 放行 = 允许匿名探测"某手机号是否已注册"（枚举风险）。
+      #      本项目为演示环境接受该权衡；生产环境应在 fm-user 侧加 IP 频控 / 图形验证码后再开放。
+      - PUT:/us/students/password
+      - GET:/us/users/checkCellphone
       # 接口文档与健康检查
       - /doc.html
       - /webjars/**

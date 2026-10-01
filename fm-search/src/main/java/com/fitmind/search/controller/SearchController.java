@@ -40,6 +40,7 @@ public class SearchController {
     @Operation(summary = "课程搜索（关键词 + 筛选 + 分页 + 高亮）")
     @GetMapping("/portal")
     public PageDTO<CourseSearchVO> search(CourseSearchQuery query) {
+
         return searchService.search(query);
     }
 

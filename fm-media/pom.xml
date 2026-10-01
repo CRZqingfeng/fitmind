@@ -39,6 +39,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
+        <!-- 接口文档 -->
+        <dependency>
+            <groupId>com.github.xiaoymin</groupId>
+            <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
+        </dependency>
 
         <!-- 服务注册发现 -->
         <dependency>
@@ -56,10 +61,32 @@
             <artifactId>spring-cloud-starter-loadbalancer</artifactId>
         </dependency>
 
-        <!-- 对象存储 MinIO：训练视频与图片都存这里 -->
+        <!-- 对象存储 MinIO：训练视频与图片都存这里（fm.storage.type=minio 时使用） -->
         <dependency>
             <groupId>io.minio</groupId>
             <artifactId>minio</artifactId>
+        </dependency>
+
+        <!-- ============ 对象存储 阿里云 OSS（fm.storage.type=oss 时使用，M9-1） ============
+             ★ 两套 SDK 同时留在 classpath 上，由 @ConditionalOnProperty 决定装配哪一套实现。
+               这样做的好处是"切换 = 改一行配置"，不必为了换后端重新编译一个不同的包。
+               代价是 jar 体积变大（本地演示可接受，见 docs/M9-1 §十一）。 -->
+        <dependency>
+            <groupId>com.aliyun.oss</groupId>
+            <artifactId>aliyun-sdk-oss</artifactId>
+        </dependency>
+        <!-- OSS SDK V1 依赖 JAXB，Java 17 下必须显式引入（否则运行期才炸，见根 pom 注释） -->
+        <dependency>
+            <groupId>javax.xml.bind</groupId>
+            <artifactId>jaxb-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>javax.activation</groupId>
+            <artifactId>activation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.glassfish.jaxb</groupId>
+            <artifactId>jaxb-runtime</artifactId>
         </dependency>
 
         <!-- 持久层 -->

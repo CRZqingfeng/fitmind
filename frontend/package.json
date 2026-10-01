@@ -20,6 +20,9 @@
     "accept:m7-7": "node scripts/accept-web-m7-7.mjs",
     "accept:m7-8": "node scripts/accept-web-m7-8.mjs",
     "accept:m7-10": "node scripts/accept-web-m7-10.mjs",
+    "accept:m7-12a": "node scripts/accept-web-m7-12a.mjs",
+    "accept:m7-12b": "node scripts/accept-web-m7-12b.mjs",
+    "accept:m7-12c": "node scripts/accept-web-m7-12c.mjs",
     "accept:m8-2a": "node scripts/accept-web-m8-2a.mjs",
     "accept:m8-2c": "node scripts/accept-web-m8-2c.mjs"
   },

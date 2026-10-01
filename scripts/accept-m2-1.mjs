@@ -19,8 +19,43 @@
 
 const GATEWAY = 'http://localhost:10010';
 const MEDIA_DIRECT = 'http://localhost:8083'; // 直连，用于验证内部接口不被包装成 R
-const MINIO = 'http://localhost:9000';
-const BUCKET = 'fitmind';
+
+/**
+ * ★★ 对象存储后端（M9-1 起可插拔：minio / oss）
+ *
+ * 以前这里写死 `http://localhost:9000` + `fitmind`，切到 OSS 后这些断言会指向一个
+ * **不存在的服务** —— 要么假红、要么静默跳过。所以改成由环境变量驱动：
+ *
+ *     FM_STORAGE_TYPE=oss node scripts/accept-m2-1.mjs
+ *
+ * 默认仍是 minio（本机开发），行为与改造前完全一致。
+ */
+const STORAGE_TYPE = process.env.FM_STORAGE_TYPE || 'minio';
+const STORAGE = STORAGE_TYPE === 'oss'
+  ? {
+      kind: 'oss',
+      // ★ OSS 是 virtual-hosted：{bucket}.{host}/{key}（MinIO 是 {host}/{bucket}/{key}）
+      publicEndpoint: process.env.FM_STORAGE_PUBLIC || 'https://itcrz-9527.oss-cn-beijing.aliyuncs.com',
+      bucket: process.env.FM_STORAGE_BUCKET || 'itcrz-9527',
+      // 预签名参数名不同：MinIO/S3 是 X-Amz-Signature，OSS 是 x-oss-signature（V4）
+      signatureParam: 'x-oss-signature',
+    }
+  : {
+      kind: 'minio',
+      publicEndpoint: process.env.FM_STORAGE_PUBLIC || 'http://localhost:9000',
+      bucket: process.env.FM_STORAGE_BUCKET || 'fitmind',
+      signatureParam: 'X-Amz-Signature',
+    };
+
+/** 由 key 拼出"不带签名的原始地址" —— ★ 两种后端的拼法不同，必须分支 */
+function rawUrlOf(key) {
+  return STORAGE.kind === 'oss'
+    ? `${STORAGE.publicEndpoint}/${key}`
+    : `${STORAGE.publicEndpoint}/${STORAGE.bucket}/${key}`;
+}
+
+/** 从 key 所在前缀判断它是否"允许匿名读"（与两份白名单脚本保持一致） */
+const PUBLIC_PREFIXES = ['avatar', 'course-cover', 'action-cover', 'media-cover', 'common'];
 
 let passed = 0;
 let failed = 0;
@@ -137,7 +172,7 @@ async function main() {
   console.log('========================================');
   console.log(' FitMind M2-1 训练媒资 —— 端到端验收');
   console.log('========================================');
-  console.log(`网关：${GATEWAY}   直连媒资：${MEDIA_DIRECT}   MinIO：${MINIO}`);
+  console.log(`网关：${GATEWAY}   直连媒资：${MEDIA_DIRECT}   存储：${STORAGE.publicEndpoint}`);
 
   // ==================== 0. 登录拿 token ====================
   section('0. 登录获取 token');
@@ -158,17 +193,46 @@ async function main() {
   }
 
   // ==================== 1. 环境 ====================
-  section('1. 环境与对象存储');
-  const live = await fetch(`${MINIO}/minio/health/live`).then((r) => r.status).catch(() => 0);
-  check('MinIO 健康检查通过', live === 200, `HTTP ${live}`);
+  section(`1. 环境与对象存储（后端 = ${STORAGE.kind}）`);
+  console.log(`     网关：${GATEWAY}   直连媒资：${MEDIA_DIRECT}`);
+  console.log(`     存储：${STORAGE.publicEndpoint}   bucket=${STORAGE.bucket}`);
 
-  const cors = await fetch(`${MINIO}/${BUCKET}/probe.txt`, {
+  if (STORAGE.kind === 'minio') {
+    // MinIO 有专门的健康检查端点；OSS 没有对应的"存活"概念（它是托管服务）
+    const live = await fetch(`${STORAGE.publicEndpoint}/minio/health/live`).then((r) => r.status).catch(() => 0);
+    check('MinIO 健康检查通过', live === 200, `HTTP ${live}`);
+  } else {
+    // OSS：匿名列桶会返回 403（不允许 ListBucket）—— **能拿到 403 就说明服务可达且鉴权在生效**
+    const r = await fetch(`${STORAGE.publicEndpoint}/`).then((x) => x.status).catch(() => 0);
+    check('★ OSS 端点可达且匿名列桶被拒绝（403 = 服务通 + 权限生效）', r === 403, `HTTP ${r}`);
+  }
+
+  /**
+   * CORS 预检 —— ★ 这是"浏览器直传能不能用"的唯一前置。
+   *
+   * ⚠️ 两种后端的可观察行为不同，不能套用同一个断言：
+   *   · MinIO：默认全局 CORS，OPTIONS 返回 **204** + `access-control-allow-origin`
+   *   · OSS  ：需要桶上配 CORS 规则；未配时返回 **403**（且没有 allow-origin 头）
+   *           —— 注意 Node/curl 的 PUT **不受 CORS 影响**，所以这个断言失败时
+   *              "命令行上传完全正常、浏览器上传就是不动"，最容易误判成前端 bug。
+   */
+  const preflightKey = STORAGE.kind === 'oss' ? '' : `${STORAGE.bucket}/`;
+  const cors = await fetch(`${STORAGE.publicEndpoint}/${preflightKey}`, {
     method: 'OPTIONS',
-    headers: { Origin: 'http://localhost:5173', 'Access-Control-Request-Method': 'PUT' },
+    headers: {
+      Origin: 'http://localhost:5173',
+      'Access-Control-Request-Method': 'PUT',
+      'Access-Control-Request-Headers': 'content-type',
+    },
   }).catch(() => null);
   const allowOrigin = cors?.headers.get('access-control-allow-origin');
-  check('CORS 预检放行（浏览器可直传）', cors?.status === 204 && !!allowOrigin,
-    `status=${cors?.status}, allow-origin=${allowOrigin}`);
+  if (STORAGE.kind === 'oss') {
+    check('★★ CORS 预检放行（浏览器直传的前置条件；未配 CORS 时这里会是 403）',
+      cors?.status === 200 && !!allowOrigin, `status=${cors?.status}, allow-origin=${allowOrigin}`);
+  } else {
+    check('CORS 预检放行（浏览器可直传）', cors?.status === 204 && !!allowOrigin,
+      `status=${cors?.status}, allow-origin=${allowOrigin}`);
+  }
 
   // ==================== 2. 图片上传与访问 ====================
   section('2. 图片上传（服务端中转）');
@@ -188,7 +252,7 @@ async function main() {
   const fileId = upJson?.data?.id;
   check('返回文件 id', !!fileId, `data=${JSON.stringify(upJson?.data)}`);
   const fileUrl = upJson?.data?.url;
-  check('返回带签名的访问地址', !!fileUrl && fileUrl.includes('X-Amz-Signature'),
+  check('返回带签名的访问地址', !!fileUrl && fileUrl.includes(STORAGE.signatureParam),
     `url=${String(fileUrl).slice(0, 80)}`);
 
   // 关键：真实 HTTP 请求去访问这个 URL
@@ -201,6 +265,21 @@ async function main() {
   check('按 id 查询文件成功', getFile.json?.code === 200 && getFile.json?.data?.id === fileId,
     `msg=${getFile.json?.msg}`);
 
+  /**
+   * ★★ 图片的**匿名读**（与第 5 节"视频必须 403"成对）。
+   *
+   * 为什么必须成对：只验"视频 403"的话，**把桶整个设成私有**也能让这条通过 ——
+   * 而那样全站封面都会挂（前端 `<img>` 不能带 Authorization）。
+   * 两条一起才表达出真正想要的不变式：
+   *     **图片可匿名读、视频必须签名**。
+   */
+  const rawImgUrl = upJson?.data?.rawUrl;
+  if (rawImgUrl) {
+    const anon = await fetch(String(rawImgUrl)).catch(() => null);
+    check('★★ 图片 rawUrl 匿名可读 200（否则全站封面会挂）',
+      anon?.status === 200, `status=${anon?.status} ← ${String(rawImgUrl).slice(0, 80)}`);
+  }
+
   // ==================== 3. 申请上传签名 + 前端直传 ====================
   section('3. 视频上传签名（前端直传）');
   const videoBytes = Buffer.from('FakeMp4Content-ForAcceptanceTest-' + Date.now());
@@ -210,16 +289,23 @@ async function main() {
   const mediaId = sigRes.json?.data?.mediaId;
   const uploadUrl = sigRes.json?.data?.uploadUrl;
   check('返回预创建的媒资 id', !!mediaId, `mediaId=${mediaId}`);
-  check('返回预签名上传地址', !!uploadUrl && uploadUrl.includes('X-Amz-Signature'),
+  check('返回预签名上传地址', !!uploadUrl && uploadUrl.includes(STORAGE.signatureParam),
     `url=${String(uploadUrl).slice(0, 70)}`);
 
   // 关键：真的用这个 URL 把文件 PUT 上去
+  /**
+   * ★★ Content-Type 用**后端回传的**那个（不是我们自己写死 'video/mp4'）——
+   * 阿里云 OSS 的 V4 签名把 Content-Type 算进签名，值不一致就是 403 SignatureDoesNotMatch。
+   * MinIO 模式后端不回传该字段，回退到 'video/mp4'，行为与改造前一致。
+   */
+  const putContentType = sigRes.json?.data?.contentType || 'video/mp4';
   const putRes = await fetch(uploadUrl, {
     method: 'PUT',
     body: videoBytes,
-    headers: { 'Content-Type': 'video/mp4' },
+    headers: { 'Content-Type': putContentType },
   }).catch((e) => ({ status: 0, text: () => e.message }));
-  check('★ 用预签名 URL 直传 MinIO 成功', putRes.status === 200,
+  check(`★ 用预签名 URL 直传成功（Content-Type=${putContentType}，OSS 下它参与签名）`,
+    putRes.status === 200,
     `status=${putRes.status}, ${await putRes.text?.().catch(() => '')}`);
 
   // ==================== 4. 确认上传 ====================
@@ -230,7 +316,7 @@ async function main() {
   check('时长已写入', confirmRes.json?.data?.duration === 125,
     `duration=${confirmRes.json?.data?.duration}`);
   // ⚠️ size 现在是字符串（Long→String）
-  check('★ 大小取自 MinIO 真实值', String(confirmRes.json?.data?.size) === String(videoBytes.length),
+  check('★ 大小取自对象存储的真实值（未信前端传值）', String(confirmRes.json?.data?.size) === String(videoBytes.length),
     `size=${confirmRes.json?.data?.size}, 期望=${videoBytes.length}`);
 
   // ==================== 5. 播放地址 ====================
@@ -238,7 +324,7 @@ async function main() {
   const playRes = await call('GET', `/ms/medias/${mediaId}/play-url`, { token });
   check('获取播放地址成功', playRes.json?.code === 200, `msg=${playRes.json?.msg}`);
   const playUrl = playRes.json?.data?.url;
-  check('播放地址带签名', !!playUrl && playUrl.includes('X-Amz-Signature'));
+  check('播放地址带签名', !!playUrl && playUrl.includes(STORAGE.signatureParam));
   check('有效期为配置值 7200 秒', playRes.json?.data?.expire === 7200,
     `expire=${playRes.json?.data?.expire}`);
 
@@ -255,7 +341,7 @@ async function main() {
   //   · 最初断言 `403`（bucket 私有）；
   //   · M7-2 时为了演示改成 `200` —— 因为课程封面是浏览器**直链**拉 MinIO 的，
   //     桶一私就全挂，于是把整个 bucket 开了匿名只读（清单 #B3）；
-  //   · 但那同时意味着**付费视频能绕过签名直接下载**（去掉 `?X-Amz-Signature` 即可）。
+  //   · 但那同时意味着**付费视频能绕过签名直接下载**（去掉签名参数即可）。
   //   · M8-1 把策略**收窄**为「5 个展示类前缀 + media/ 下的图片扩展名」：
   //       - media/ 下的 **mp4** → 403（= 本条约验的）
   //       - media/ 下的 **图片**（封面）→ 仍可匿名读（否则封面会挂）
@@ -264,9 +350,10 @@ async function main() {
   // ⚠️ **看到这条红了，不要"按断言把桶改回公开"** —— 那是在重新打开 #B3。
   //    正确的排查顺序：① 桶策略是不是又被整体放开了（跑 `scripts/setup-minio-anonymous.py --show`）；
   //    ② 这个对象是不是**图片**（图片本就该 200，那就说明对象选错了）。
-  const rawUrl = `${MINIO}/${BUCKET}/${sigRes.json?.data?.key}`;
+  // ★ 按后端拼裸链（OSS virtual-hosted / MinIO path-style）
+  const rawUrl = rawUrlOf(sigRes.json?.data?.key);
   const rawRes = await fetch(rawUrl).catch(() => null);
-  check('★★ 无签名直访**视频**被拒绝 403（M8-1 已收窄匿名读，见 #B3）',
+  check('★★ 无签名直访**视频**被拒绝 403（M8-1 收窄匿名读，见 #B3；OSS 侧同等对待）',
     rawRes?.status === 403, `status=${rawRes?.status}（若是 200，说明桶又被整体开放了）`);
 
   // ==================== 6. 列表与分页 ====================
@@ -306,7 +393,7 @@ async function main() {
   check('删除成功', delRes.json?.code === 200 || delRes.status === 200, `msg=${delRes.json?.msg}`);
 
   const afterDel = await fetch(playUrl).catch(() => null);
-  check('★ 删除后 MinIO 对象真的没了（再访问 404）',
+  check('★ 删除后对象真的没了（再访问 404）',
     afterDel?.status === 404 || afterDel?.status === 403,
     `status=${afterDel?.status}`);
 

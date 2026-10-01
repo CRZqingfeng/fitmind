@@ -11,7 +11,7 @@ import com.fitmind.media.enums.FileStatus;
 import com.fitmind.media.mapper.FileMapper;
 import com.fitmind.media.service.IFileService;
 import com.fitmind.media.storage.IFileStorage;
-import com.fitmind.media.storage.MinioProperties;
+import com.fitmind.media.storage.StorageProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -32,7 +32,13 @@ import java.util.UUID;
 public class FileServiceImpl extends ServiceImpl<FileMapper, File> implements IFileService {
 
     private final IFileStorage fileStorage;
-    private final MinioProperties properties;
+
+    /**
+     * ★ 注意这里注入的是 {@link StorageProperties}（通用）而不是 MinioProperties（厂商专属）——
+     * 本类只用到"签名有效期"这一个与厂商无关的配置。若注入 MinioProperties，
+     * 切到 OSS 后该 Bean 不存在，服务会**启动失败**。
+     */
+    private final StorageProperties storageProperties;
 
     @Override
     public FileDTO uploadFile(MultipartFile file, BizType bizType) {
@@ -78,7 +84,7 @@ public class FileServiceImpl extends ServiceImpl<FileMapper, File> implements IF
         dto.setFilename(originalFilename);
         dto.setSize(size);
         dto.setRawUrl(fileStorage.getRawUrl(key));
-        dto.setUrl(fileStorage.getAccessUrl(key, properties.getPlayExpire()));
+        dto.setUrl(fileStorage.getAccessUrl(key, storageProperties.getPlayExpire()));
         return dto;
     }
 
@@ -93,7 +99,7 @@ public class FileServiceImpl extends ServiceImpl<FileMapper, File> implements IF
         dto.setFilename(po.getFilename());
         dto.setSize(po.getSize());
         dto.setRawUrl(po.getUrl());
-        dto.setUrl(fileStorage.getAccessUrl(po.getKey(), properties.getPlayExpire()));
+        dto.setUrl(fileStorage.getAccessUrl(po.getKey(), storageProperties.getPlayExpire()));
         return dto;
     }
 

@@ -13,6 +13,7 @@ import io.minio.http.Method;
 import io.minio.messages.DeleteError;
 import io.minio.messages.DeleteObject;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
@@ -28,13 +29,17 @@ import java.util.stream.Collectors;
  *   <li><b>播放预签名</b>：bucket 是私有的，每次播放都要换一个带签名的临时地址</li>
  *   <li><b>stat 校验</b>：确认上传时向 MinIO 核实对象是否真的存在、真实大小是多少</li>
  * </ol>
+ *
+ * <p>★ 仅当 {@code fm.storage.type=minio}（或未配置）时装配 —— 切到 OSS 后本类不注册，
+ * 由 {@code OssMediaStorage} 顶上。两者实现同一个 {@link IMediaStorage}，上层无感。</p>
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(name = "fm.storage.type", havingValue = "minio", matchIfMissing = true)
 public class MinioMediaStorage extends AbstractMinioStorage implements IMediaStorage {
 
-    public MinioMediaStorage(MinioClient minioClient, MinioProperties properties) {
-        super(minioClient, properties);
+    public MinioMediaStorage(MinioClient minioClient, MinioProperties properties, StorageProperties storage) {
+        super(minioClient, properties, storage);
     }
 
     @Override
@@ -42,7 +47,7 @@ public class MinioMediaStorage extends AbstractMinioStorage implements IMediaSto
         try {
             String url = minioClient.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
                     .method(Method.PUT)
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .object(key)
                     .expiry(expire)
                     .build());
@@ -58,7 +63,7 @@ public class MinioMediaStorage extends AbstractMinioStorage implements IMediaSto
         try {
             String url = minioClient.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
                     .method(Method.GET)
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .object(key)
                     .expiry(expire)
                     .build());
@@ -73,7 +78,7 @@ public class MinioMediaStorage extends AbstractMinioStorage implements IMediaSto
     public MediaUploadResult uploadFile(String filename, String key, InputStream inputStream, long contentLength) {
         try {
             minioClient.putObject(PutObjectArgs.builder()
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .object(key)
                     .stream(inputStream, contentLength, -1)
                     .build());
@@ -92,7 +97,7 @@ public class MinioMediaStorage extends AbstractMinioStorage implements IMediaSto
     public Long statFile(String key) {
         try {
             StatObjectResponse stat = minioClient.statObject(StatObjectArgs.builder()
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .object(key)
                     .build());
             return stat.size();
@@ -110,7 +115,7 @@ public class MinioMediaStorage extends AbstractMinioStorage implements IMediaSto
     public void deleteFile(String key) {
         try {
             minioClient.removeObject(RemoveObjectArgs.builder()
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .object(key)
                     .build());
         } catch (Exception e) {
@@ -129,7 +134,7 @@ public class MinioMediaStorage extends AbstractMinioStorage implements IMediaSto
                     .map(DeleteObject::new)
                     .collect(Collectors.toList());
             Iterable<Result<DeleteError>> results = minioClient.removeObjects(RemoveObjectsArgs.builder()
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .objects(objects)
                     .build());
             for (Result<DeleteError> result : results) {

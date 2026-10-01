@@ -195,3 +195,84 @@ export interface CouponDiscount {
   /** 每门课分摊到的优惠金额：{ courseId: 分 } */
   discountDetail: Record<string, number> | null
 }
+
+// ============================================================
+// M7-12：退款详情 / 支付单状态
+// ============================================================
+
+/**
+ * 退款详情（`GET /ts/refund-apply/{id}` 与 `GET /ts/refund-apply/detail/{detailId}` 的 data）。
+ *
+ * ★ 比列表项（`RefundApplyItem`）多了**审批与渠道**两段信息，
+ *   这正是"详情页"的价值：用户想知道"为什么被拒了""退到哪个渠道了"。
+ *
+ * ★★ 课程名与价格都是**订单明细里的快照**，不是课程表当前值 ——
+ *    后端 `RefundApplyVO` 类注释原话："退款详情是交易凭证的一部分，
+ *    必须显示『当时买的是什么、花了多少』"。所以**页面不要拿课程接口去"刷新"这些值**。
+ */
+export interface RefundDetail {
+  id: string
+  orderId: string
+  orderDetailId: string
+  courseId: string
+  /** 下单时的课程名快照 */
+  courseName: string
+  coverUrl: string | null
+  /** 课程原价（分，快照） */
+  price: number | null
+  /** 分摊到的优惠（分） */
+  discountAmount: number | null
+  /** ★ 实付金额（分）—— 退款金额就是它 */
+  realPayAmount: number | null
+  refundAmount: number | null
+  /** 1-待审批 2-已取消 3-同意退款 4-已拒绝 5-退款成功 6-退款失败 */
+  status: number
+  statusDesc: string | null
+  /** 给用户看的一句话说明 */
+  message: string | null
+  refundReason: string | null
+  questionDesc: string | null
+  createTime: string | null
+  approveOpinion: string | null
+  approveTime: string | null
+  /** 退款单号（渠道侧） */
+  refundOrderNo: string | null
+  refundChannel: string | null
+  failedReason: string | null
+  finishTime: string | null
+  /** 原支付单号 */
+  payOrderNo: string | null
+  payChannel: string | null
+}
+
+/** 支付单状态（后端 `fm-pay` 的 `PayConstants.PAY_STATUS_*`） */
+export const PayStatus = {
+  NO_PAY: 1,
+  PAYED: 2,
+  CLOSED: 3,
+} as const
+
+/**
+ * 支付单（`GET /ps/pay-orders/{payOrderNo}` 的 data）。
+ *
+ * ⚠️ ★ 这个接口返回的是**裸 PO**（不是 VO），而且：
+ *   · 查不到 → `data: null`
+ *   · **不是自己的支付单 → 也是 `data: null`**（后端做了归属校验，直接返回 null 而不是报错）
+ *   → 所以前端必须按"可能为 null"处理，**不能靠抛错来判断"不存在"**。
+ */
+export interface PayOrder {
+  id: string
+  payOrderNo: string
+  bizOrderNo: string
+  bizUserId: string
+  payChannelCode: string | null
+  /** 金额（分） */
+  amount: number
+  /** 1-未支付 2-已支付 3-已关闭 */
+  status: number
+  qrCodeUrl: string | null
+  paySuccessTime: string | null
+  expireTime: string | null
+  createTime: string | null
+  updateTime: string | null
+}

@@ -27,6 +27,22 @@ public interface IExchangeCodeService extends IService<ExchangeCode> {
      */
     Long queryTargetId(long serialNum);
 
-    /** 标记某个序号已兑换（bitmap） */
+    /**
+     * 原子地抢占某个序号（bitmap 置位）。
+     *
+     * <p>★ 返回 <b>true = 本次抢到</b>（此前未被兑换）；false = 已被别人兑换过。
+     * 语义是"<b>尝试抢占</b>"而不是"无条件置位"—— 调用方必须按返回值决定是否继续发券，
+     * 不能当 void 用。</p>
+     *
+     * @return 本次是否抢占成功
+     */
     boolean markExchanged(long serialNum);
+
+    /**
+     * 释放某个序号的占位（补偿操作，与 {@link #markExchanged} 配对）。
+     *
+     * <p>⚠️ 抢占成功后、发券落库之前出了任何异常，都<b>必须</b>调用本方法把码放回去。
+     * 否则这个码会被<b>永久吃掉</b>：券没发出去，用户也不能重试（#A17）。</p>
+     */
+    void releaseExchanged(long serialNum);
 }

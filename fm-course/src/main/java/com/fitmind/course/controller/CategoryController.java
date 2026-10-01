@@ -41,6 +41,7 @@ public class CategoryController {
     @Operation(summary = "查询课程分类（默认返回三级树）")
     @GetMapping("/list")
     public List<CategoryVO> list(CategoryListDTO dto) {
+
         return categoryService.list(dto);
     }
 

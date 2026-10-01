@@ -67,6 +67,17 @@
         <redisson.version>3.13.6</redisson.version>
         <xxl-job-version>2.3.1</xxl-job-version>
         <minio.version>8.5.12</minio.version>
+        <!-- ★ 阿里云 OSS SDK（Java SDK V1）。
+             为什么是 V1 而不是 V2：V2 仍是预览版、API 可能变动，且社区资料少；
+             V1 长期稳定、示例丰富，适合本项目"能跑通且讲得清"的定位。
+             ⚠️ 版本取 3.18.5（当前 3.18.x 最新）。 -->
+        <aliyun-oss.version>3.18.5</aliyun-oss.version>
+        <!-- ⚠️ OSS SDK V1 用了 javax.xml.bind，而 Java 9+ 已把 JAXB 从 JDK 移除 ——
+             不补这三个依赖会在**运行期**才报 ClassNotFoundException（编译期不报）。
+             ★ 注意是 javax 命名空间，不是 Jakarta（引 jakarta 版本解决不了）。 -->
+        <jaxb-api.version>2.3.1</jaxb-api.version>
+        <jaxb-activation.version>1.1.1</jaxb-activation.version>
+        <jaxb-runtime.version>2.3.3</jaxb-runtime.version>
         <!-- ES 客户端版本。取 7.17.10 而不是 Boot 默认的 8.x：
              1) 服务端是 elasticsearch:7.17.22，客户端同小版本线最稳
              2) 本地 Maven 仓库已有 7.17.10（连带 lucene 8.11.1），可离线构建 -->
@@ -175,6 +186,29 @@
                 <groupId>io.minio</groupId>
                 <artifactId>minio</artifactId>
                 <version>${minio.version}</version>
+            </dependency>
+
+            <!-- ==================== 对象存储 阿里云 OSS（M9-1 起与 MinIO 二选一） ==================== -->
+            <dependency>
+                <groupId>com.aliyun.oss</groupId>
+                <artifactId>aliyun-sdk-oss</artifactId>
+                <version>${aliyun-oss.version}</version>
+            </dependency>
+            <!-- OSS SDK V1 的 JAXB 依赖（Java 9+ 必须显式引入，见 properties 里的说明） -->
+            <dependency>
+                <groupId>javax.xml.bind</groupId>
+                <artifactId>jaxb-api</artifactId>
+                <version>${jaxb-api.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>javax.activation</groupId>
+                <artifactId>activation</artifactId>
+                <version>${jaxb-activation.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.jaxb</groupId>
+                <artifactId>jaxb-runtime</artifactId>
+                <version>${jaxb-runtime.version}</version>
             </dependency>
 
             <!-- 分布式任务调度 -->

@@ -22,6 +22,13 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/LoginView.vue'),
     meta: { title: '登录', public: true, hideInMenu: true },
   },
+  // M7-12：注册页（★ 免登录；M7 方案 §7.1 第 1 页承诺过但此前未交付）
+  {
+    path: '/register',
+    name: 'register',
+    component: () => import('@/views/RegisterView.vue'),
+    meta: { title: '注册', public: true, hideInMenu: true },
+  },
   {
     path: '/',
     component: DefaultLayout,
@@ -82,6 +89,13 @@ const routes: RouteRecordRaw[] = [
         name: 'refunds',
         component: () => import('@/views/RefundsView.vue'),
         meta: { title: '我的退款' },
+      },
+      // M7-12：我的优惠券 + 兑换码（★ M7 方案 §7.1 第 10 页承诺过，此前只有接口没有页面）
+      {
+        path: 'my-coupons',
+        name: 'my-coupons',
+        component: () => import('@/views/MyCouponsView.vue'),
+        meta: { title: '我的优惠券', hideInMenu: true },
       },
       // ==================== M7-4 学习链路 ====================
       {

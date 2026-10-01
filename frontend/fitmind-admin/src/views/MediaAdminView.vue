@@ -8,6 +8,8 @@ import CoverThumb from '@/components/CoverThumb.vue'
 import type { MediaVO } from '@/types/admin'
 import { MEDIA_STATUS } from '@/types/admin'
 import { formatDateTime, formatDuration, formatFileSize, mediaStatusTagType, pageTotal } from '@/utils/format'
+// ★ M7-12 第 2 期：三个直传小工具搬到 `utils/media-upload.ts`，与建课向导共用（行为不变）
+import { guessMime, putToMinio, readVideoDuration } from '@/utils/media-upload'
 
 /**
  * 媒资管理（预签名直传）
@@ -58,65 +60,6 @@ async function load() {
   }
 }
 
-/** 按扩展名猜 MIME（`file.type` 在部分环境下是空串） */
-function guessMime(name: string): { mime: string; guessed: boolean } {
-  const ext = name.toLowerCase().slice(name.lastIndexOf('.') + 1)
-  const map: Record<string, string> = {
-    mp4: 'video/mp4',
-    mov: 'video/quicktime',
-    webm: 'video/webm',
-    png: 'image/png',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
-    webp: 'image/webp',
-    svg: 'image/svg+xml',
-  }
-  return { mime: map[ext] ?? 'application/octet-stream', guessed: true }
-}
-
-/** 用 `<video>` 读出时长（后端 confirm 需要它；前端不读，这个字段就只能是 0） */
-function readVideoDuration(file: File): Promise<number> {
-  return new Promise((resolve) => {
-    if (!file.type.startsWith('video/') && !/\.(mp4|mov|webm)$/i.test(file.name)) {
-      resolve(0)
-      return
-    }
-    const url = URL.createObjectURL(file)
-    const v = document.createElement('video')
-    v.preload = 'metadata'
-    v.onloadedmetadata = () => {
-      const d = Number.isFinite(v.duration) ? Math.round(v.duration) : 0
-      URL.revokeObjectURL(url)
-      resolve(d)
-    }
-    // ★ 读不出来就返回 0，**不 reject** —— 时长不是必需信息，
-    //   为了它让整次上传失败是本末倒置（后端也接受 duration=0）
-    v.onerror = () => {
-      URL.revokeObjectURL(url)
-      resolve(0)
-    }
-    v.src = url
-  })
-}
-
-/** PUT 直传（用 XHR 才能拿到进度） */
-function putToMinio(url: string, file: File, mime: string, onProgress: (p: number) => void): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open('PUT', url, true)
-    xhr.setRequestHeader('Content-Type', mime)
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
-    }
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) resolve()
-      else reject(new Error(`MinIO 返回 HTTP ${xhr.status}：${xhr.responseText?.slice(0, 120) ?? ''}`))
-    }
-    xhr.onerror = () => reject(new Error('直传失败（网络中断或 MinIO 不可达）'))
-    xhr.send(file)
-  })
-}
-
 async function handleFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
@@ -137,7 +80,9 @@ async function handleFileChange(e: Event) {
     if (!sig?.uploadUrl) throw new Error('没拿到上传地址')
 
     uploadStage.value = '② 直传对象存储…'
-    await putToMinio(sig.uploadUrl, file, finalMime, (p) => (uploadPercent.value = p))
+    // ★★ 优先用后端回传的 contentType（OSS 的 V4 签名把它算进去了，必须原样带）；
+    //    MinIO 模式下它为空，回退到原有自猜值，行为不变。见 types/admin.ts 的说明。
+    await putToMinio(sig.uploadUrl, file, sig.contentType || finalMime, (p) => (uploadPercent.value = p))
 
     uploadStage.value = '③ 读取时长并确认…'
     const duration = await readVideoDuration(file)

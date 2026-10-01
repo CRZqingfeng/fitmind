@@ -9,6 +9,7 @@ import io.minio.Result;
 import io.minio.messages.DeleteError;
 import io.minio.messages.DeleteObject;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
@@ -17,20 +18,24 @@ import java.util.stream.Collectors;
 
 /**
  * 文件存储的 MinIO 实现（图片等通用文件）。
+ *
+ * <p>★ 仅当 {@code fm.storage.type=minio}（或未配置）时装配 —— 切到 OSS 后本类不注册，
+ * 由 {@code OssFileStorage} 顶上。两者实现同一个 {@link IFileStorage}，上层无感。</p>
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(name = "fm.storage.type", havingValue = "minio", matchIfMissing = true)
 public class MinioFileStorage extends AbstractMinioStorage implements IFileStorage {
 
-    public MinioFileStorage(MinioClient minioClient, MinioProperties properties) {
-        super(minioClient, properties);
+    public MinioFileStorage(MinioClient minioClient, MinioProperties properties, StorageProperties storage) {
+        super(minioClient, properties, storage);
     }
 
     @Override
     public String uploadFile(String key, InputStream inputStream, long contentLength) {
         try {
             minioClient.putObject(PutObjectArgs.builder()
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .object(key)
                     .stream(inputStream, contentLength, -1)
                     .build());
@@ -51,7 +56,7 @@ public class MinioFileStorage extends AbstractMinioStorage implements IFileStora
         try {
             String url = minioClient.getPresignedObjectUrl(io.minio.GetPresignedObjectUrlArgs.builder()
                     .method(io.minio.http.Method.GET)
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .object(key)
                     .expiry(expire)
                     .build());
@@ -75,7 +80,7 @@ public class MinioFileStorage extends AbstractMinioStorage implements IFileStora
     public InputStream downloadFile(String key) {
         try {
             return minioClient.getObject(GetObjectArgs.builder()
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .object(key)
                     .build());
         } catch (Exception e) {
@@ -88,7 +93,7 @@ public class MinioFileStorage extends AbstractMinioStorage implements IFileStora
     public void deleteFile(String key) {
         try {
             minioClient.removeObject(RemoveObjectArgs.builder()
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .object(key)
                     .build());
         } catch (Exception e) {
@@ -107,7 +112,7 @@ public class MinioFileStorage extends AbstractMinioStorage implements IFileStora
                     .map(DeleteObject::new)
                     .collect(Collectors.toList());
             Iterable<Result<DeleteError>> results = minioClient.removeObjects(RemoveObjectsArgs.builder()
-                    .bucket(properties.getBucket())
+                    .bucket(storage.getBucket())
                     .objects(objects)
                     .build());
             // 必须遍历一次才会真正触发删除请求；顺便收集失败项

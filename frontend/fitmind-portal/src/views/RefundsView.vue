@@ -4,8 +4,8 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 
-import { cancelRefund, pageRefunds } from '@/api/trade'
-import type { RefundApplyItem } from '@/types/trade'
+import { cancelRefund, getRefundDetail, pageRefunds } from '@/api/trade'
+import type { RefundApplyItem, RefundDetail } from '@/types/trade'
 import { RefundStatus } from '@/types/trade'
 import { formatDateTime, formatPrice, pageTotal, refundStatusTagType } from '@/utils/format'
 
@@ -14,6 +14,10 @@ import { formatDateTime, formatPrice, pageTotal, refundStatusTagType } from '@/u
  *
  * 退款是**异步**的：提交申请只是"我说要退"，后面还要经过审批 → 调渠道 → 结果回调。
  * 所以这个页面的价值是"让用户看得见进度"，而不是"点一下就完事"。
+ *
+ * M7-12 补上**退款详情**（`GET /ts/refund-apply/{id}`）：
+ * 列表只够"扫一眼进度"，而用户点进来的真正诉求通常是
+ * 「为什么被拒了」「退到哪个渠道了」「渠道单号是多少」—— 这三样只在详情里。
  */
 const router = useRouter()
 
@@ -22,6 +26,37 @@ const total = ref(0)
 const pageNo = ref(1)
 const pageSize = ref(10)
 const loading = ref(false)
+
+// ==================== M7-12：退款详情 ====================
+const detailVisible = ref(false)
+const detailLoading = ref(false)
+const detail = ref<RefundDetail | null>(null)
+
+/**
+ * 查详情。
+ *
+ * ★ 有意**不**用列表里已有的字段"凑"一个详情页：
+ *   列表项没有 `approveOpinion` / `refundOrderNo` / `failedReason` / `payOrderNo`，
+ *   而这几样恰恰是详情页存在的理由。省一次请求换来一个残缺的详情，不划算。
+ */
+async function openDetail(item: RefundApplyItem) {
+  detailVisible.value = true
+  detailLoading.value = true
+  detail.value = null
+  try {
+    detail.value = await getRefundDetail(item.id)
+  } catch {
+    // 失败时给一个"至少能看"的降级：用列表项垫底（字段少但不会是空白弹窗）
+    detail.value = null
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+/** 详情里的字段：null 一律显示 —（后端未填就是 null，不要显示 "null"） */
+function val(v: unknown): string {
+  return v === null || v === undefined || v === '' ? '—' : String(v)
+}
 
 const isEmpty = computed(() => !loading.value && list.value.length === 0)
 
@@ -108,8 +143,18 @@ async function handleCancel(item: RefundApplyItem) {
           </div>
         </div>
 
-        <div v-if="item.status === RefundStatus.UN_APPROVE" class="card-actions">
-          <el-button size="small" @click="handleCancel(item)">撤销申请</el-button>
+        <div class="card-actions">
+          <!-- M7-12：详情入口（任何状态都能看 —— 被拒/失败时更需要看原因） -->
+          <el-button size="small" data-testid="refund-detail-open" @click="openDetail(item)">
+            查看详情
+          </el-button>
+          <el-button
+            v-if="item.status === RefundStatus.UN_APPROVE"
+            size="small"
+            @click="handleCancel(item)"
+          >
+            撤销申请
+          </el-button>
         </div>
       </el-card>
     </div>
@@ -123,6 +168,67 @@ async function handleCancel(item: RefundApplyItem) {
       :total="total"
       @current-change="load"
     />
+
+    <!-- ==================== M7-12：退款详情抽屉 ==================== -->
+    <el-drawer
+      v-model="detailVisible"
+      title="退款详情"
+      size="480px"
+      data-testid="refund-detail-drawer"
+    >
+      <el-skeleton v-if="detailLoading" :rows="8" animated />
+
+      <el-empty v-else-if="!detail" description="详情加载失败，请稍后重试" />
+
+      <div v-else class="detail-body" data-testid="refund-detail">
+        <div class="detail-head">
+          <span class="detail-course" data-testid="detail-course-name">{{ detail.courseName }}</span>
+          <el-tag :type="refundStatusTagType(detail.status)" data-testid="detail-status">
+            {{ detail.statusDesc }}
+          </el-tag>
+        </div>
+
+        <el-alert
+          v-if="detail.message"
+          class="detail-message"
+          type="info"
+          :title="detail.message"
+          :closable="false"
+          show-icon
+        />
+
+        <el-descriptions :column="1" border size="small">
+          <el-descriptions-item label="退款金额">
+            <span class="detail-amount" data-testid="detail-refund-amount">
+              {{ formatPrice(detail.refundAmount) }}
+            </span>
+          </el-descriptions-item>
+          <el-descriptions-item label="课程原价">{{ formatPrice(detail.price) }}</el-descriptions-item>
+          <el-descriptions-item label="分摊优惠">{{ formatPrice(detail.discountAmount) }}</el-descriptions-item>
+          <el-descriptions-item label="实付金额">{{ formatPrice(detail.realPayAmount) }}</el-descriptions-item>
+          <el-descriptions-item label="退款原因">{{ val(detail.refundReason) }}</el-descriptions-item>
+          <el-descriptions-item label="问题说明">{{ val(detail.questionDesc) }}</el-descriptions-item>
+          <el-descriptions-item label="申请时间">{{ formatDateTime(detail.createTime) }}</el-descriptions-item>
+          <el-descriptions-item label="审批意见">{{ val(detail.approveOpinion) }}</el-descriptions-item>
+          <el-descriptions-item label="审批时间">{{ formatDateTime(detail.approveTime) }}</el-descriptions-item>
+          <el-descriptions-item label="退款渠道">{{ val(detail.refundChannel) }}</el-descriptions-item>
+          <el-descriptions-item label="渠道退款单号">{{ val(detail.refundOrderNo) }}</el-descriptions-item>
+          <el-descriptions-item v-if="detail.failedReason" label="失败原因">
+            <span class="detail-failed">{{ detail.failedReason }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="完成时间">{{ formatDateTime(detail.finishTime) }}</el-descriptions-item>
+          <el-descriptions-item label="原支付单号">{{ val(detail.payOrderNo) }}</el-descriptions-item>
+          <el-descriptions-item label="原支付渠道">{{ val(detail.payChannel) }}</el-descriptions-item>
+        </el-descriptions>
+
+        <el-alert class="detail-tip" type="warning" :closable="false">
+          <template #title>
+            课程名与含税金额都是<strong>下单时的快照</strong>，不是课程的当前值 ——
+            退款详情是交易凭证的一部分，必须显示"当时买的是什么、花了多少"。
+          </template>
+        </el-alert>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -209,10 +315,43 @@ async function handleCancel(item: RefundApplyItem) {
   margin-top: 12px;
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
 }
 
 .pager {
   margin-top: 20px;
   justify-content: center;
+}
+
+/* ---- M7-12：详情抽屉 ---- */
+.detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detail-course {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.detail-amount {
+  font-weight: 700;
+  color: var(--el-color-danger);
+}
+
+.detail-failed {
+  color: var(--el-color-danger);
+}
+
+.detail-tip {
+  margin-top: 4px;
 }
 </style>

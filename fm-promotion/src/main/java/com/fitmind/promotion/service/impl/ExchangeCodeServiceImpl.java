@@ -91,8 +91,21 @@ public class ExchangeCodeServiceImpl extends ServiceImpl<ExchangeCodeMapper, Exc
     @Override
     public boolean markExchanged(long serialNum) {
         // ★ bitmap：一个码只占 1 bit。20 亿个码 ≈ 256MB，与券的数量无关
-        Boolean r = redisTemplate.opsForValue()
+        // ★★ 用 SETBIT 的**返回值（旧值）**判定，不再"先 GETBIT 再 SETBIT"：
+        //    后者是两步、中间有窗口 —— 两个并发请求同时 GETBIT 都会读到 false，双双"通过判重"。
+        //    SETBIT 在 Redis 单线程里是一个原子操作，"判重 + 抢占"一次完成，天然防并发。
+        Boolean previous = redisTemplate.opsForValue()
                 .setBit(PromotionConstants.COUPON_CODE_MAP_KEY, serialNum, true);
-        return r != null && r;
+        // 旧值为 true = 之前已有人兑换过 → 本次没抢到
+        return !Boolean.TRUE.equals(previous);
+    }
+
+    @Override
+    public void releaseExchanged(long serialNum) {
+        // ★ 补偿操作：把占位放回去，让用户能重试。
+        //   为什么需要它 —— bitmap 在 Redis、发券在 MySQL，而 **Redis 不参与 MySQL 事务**：
+        //   MySQL 回滚时 bit 不会跟着回滚，这就是 #A17（码被白白吃掉）的成因。
+        redisTemplate.opsForValue()
+                .setBit(PromotionConstants.COUPON_CODE_MAP_KEY, serialNum, false);
     }
 }

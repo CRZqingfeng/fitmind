@@ -35,6 +35,29 @@ env_get() {
 }
 export MINIO_ACCESS_KEY="$(env_get MINIO_ROOT_USER)"
 export MINIO_SECRET_KEY="$(env_get MINIO_ROOT_PASSWORD)"
+
+# ==================== M9-1 对象存储可插拔（minio / oss 二选一） ====================
+# ⚠️ 这一段在 start-group.sh 里有**一份同样的**（两个脚本各自独立注入环境变量）。
+#    改这里务必同步改那里，否则"用 A 脚本起能连上 OSS、用 B 脚本起连不上"，
+#    表现是 403 / NoSuchBucket，极难往"两个脚本不一致"上想。
+#
+# ⚠️ 只在取值非空时才 export：环境变量一旦存在（哪怕空串）就会覆盖 yml 的默认值，
+#    把 bucket 变成空字符串 → 上传跑到根目录，报错完全不像配置问题。
+export_if_set() {
+    v="$(env_get "$2")"
+    [ -n "$v" ] && export "$1=$v"
+    return 0
+}
+export FM_STORAGE_TYPE="${FM_STORAGE_TYPE:-minio}"
+if [ "$FM_STORAGE_TYPE" = "oss" ]; then
+    export_if_set FM_STORAGE_BUCKET OSS_BUCKET
+    export_if_set OSS_ENDPOINT OSS_ENDPOINT
+    export_if_set OSS_PUBLIC_ENDPOINT OSS_PUBLIC_ENDPOINT
+    export_if_set OSS_REGION OSS_REGION
+    export_if_set OSS_ACCESS_KEY_ID OSS_ACCESS_KEY_ID
+    export_if_set OSS_ACCESS_KEY_SECRET OSS_ACCESS_KEY_SECRET
+fi
+
 export RABBITMQ_USER="$(env_get RABBITMQ_USER)"
 export RABBITMQ_PASSWORD="$(env_get RABBITMQ_PASSWORD)"
 export XXL_JOB_ADMIN="http://127.0.0.1:9090/xxl-job-admin"

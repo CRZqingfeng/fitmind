@@ -28,7 +28,7 @@ fm:
   auth:
     resource:
       # 开启登录拦截（与网关形成双重防护，直连服务端口时同样受保护）
-      enable: true
+      enable: true   #true
       includeLoginPaths:
         - /categorys/**
         - /courses/**

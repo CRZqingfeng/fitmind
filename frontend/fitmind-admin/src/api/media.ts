@@ -57,3 +57,57 @@ export function deleteMedia(mediaId: string): Promise<void> {
 export function deleteMedias(ids: string[]): Promise<void> {
   return http.delete<void>('/ms/medias', { params: { ids: ids.join(',') } })
 }
+
+// ==================== 通用文件上传（M7-12 第 2 期：课程封面） ====================
+
+/**
+ * 上传返回（`FileDTO`）
+ *
+ * ★★ 两个地址字段必须分清 —— **存错会"过一会儿变破图"**：
+ *   · `url`    —— **带签名、有有效期**，只适合"临时看一眼"
+ *   · `rawUrl` —— 不带签名的原始地址，**要长期存进 `coverUrl` 的必须是它**
+ *
+ *   这与 M7 §12.6 第 4 条拒绝"用预签名做封面"的理由同源：
+ *   "有时好有时坏的东西比一直走兜底的更难排查"。
+ */
+export interface UploadedFile {
+  /** Long → string（全局约定） */
+  id: string
+  filename: string
+  /** 带签名的访问地址，**有有效期** */
+  url: string
+  /** 不带签名的原始地址（★ 入库用这个） */
+  rawUrl: string
+  size: number
+}
+
+/** 业务类型 —— 决定对象落在哪个前缀，而**前缀决定"能不能匿名读"** */
+export type FileBizType = 'course-cover' | 'action-cover' | 'media-cover' | 'avatar' | 'common'
+
+/**
+ * 上传图片（服务端中转的 multipart，**不是**预签名直传）。
+ *
+ * ★★ 课程封面为什么走这里、而**不走**预签名媒资链路（依据是 M8-1 对 #B3 的收窄）：
+ *   匿名读白名单里有 `course-cover/`、`avatar/` 等前缀，**没有 `media/`**
+ *   （`media/` 是课程视频 + 学员考核视频，必须预签名）。
+ *   `seed-demo-data.mjs` 当年把封面也丢进了 `media/`，只能靠"按扩展名放行"折中（#C31）。
+ *   新建课**从源头就走对**：`bizType=course-cover` → 落 `course-cover/` → `<img src>` 直接可用。
+ *
+ * ⚠️ **不要手写 `Content-Type: multipart/form-data`** —— multipart 需要 `boundary`，
+ *   手写一个不带 boundary 的头会让后端解析不出文件（M7-7 撞过 509 个对象）。
+ *   交给浏览器按 `FormData` 自动生成即可。
+ */
+export function uploadFile(
+  file: File,
+  bizType: FileBizType = 'common',
+  onProgress?: (percent: number) => void,
+): Promise<UploadedFile> {
+  const fd = new FormData()
+  fd.append('file', file)
+  return http.post<UploadedFile>('/ms/files', fd, {
+    params: { bizType },
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
+    },
+  })
+}

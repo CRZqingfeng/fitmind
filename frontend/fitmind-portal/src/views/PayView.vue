@@ -5,9 +5,9 @@ import { CircleCheckFilled, Refresh, Wallet } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 
-import { applyPay, getOrder, mockPay } from '@/api/trade'
-import type { Order, PayUrl } from '@/types/trade'
-import { OrderStatus } from '@/types/trade'
+import { applyPay, getOrder, getPayOrderStatus, mockPay } from '@/api/trade'
+import type { Order, PayOrder, PayUrl } from '@/types/trade'
+import { OrderStatus, PayStatus } from '@/types/trade'
 import { formatDateTime, formatPrice, formatRemaining } from '@/utils/format'
 
 /**
@@ -85,11 +85,58 @@ async function createPay() {
   creating.value = true
   try {
     payUrl.value = await applyPay(orderId.value)
+    // M7-12：拿到支付单号后顺手查一次支付单状态（渠道侧视角）
+    await loadPayOrderStatus()
   } catch {
     /* 已提示 */
   } finally {
     creating.value = false
   }
+}
+
+// ==================== M7-12：支付单状态（渠道侧视角）====================
+
+/**
+ * 支付单状态 —— `GET /ps/pay-orders/{payOrderNo}`。
+ *
+ * ★ 它和"订单状态"是**两个不同的事实**，放在一起才看得出问题：
+ *   · 订单状态（fm-trade）：由 MQ 异步驱动，可能**滞后**于渠道
+ *   · 支付单状态（fm-pay）：渠道侧的原始事实，`1-未支付 / 2-已支付 / 3-已关闭`
+ *
+ *   所以当出现"我明明付款了，订单还是待支付"时，这块能立刻区分出
+ *   是「渠道还没收到钱」还是「钱到了、MQ 还在路上」—— 这正是它的诊断价值。
+ *
+ * ⚠️ 两个实现细节（读后端源码确认）：
+ *   ① 返回**裸 PO**，`status` 用的是 `PayConstants.PAY_STATUS_*` 那套编码
+ *   ② **查不到、或不是自己的支付单 → 都返回 `data: null`**，不报错
+ *      → 所以必须判 null，不能靠 catch 判断"不存在"
+ */
+const payOrder = ref<PayOrder | null>(null)
+
+async function loadPayOrderStatus() {
+  const no = payUrl.value?.payOrderNo
+  if (!no) {
+    payOrder.value = null
+    return
+  }
+  try {
+    payOrder.value = await getPayOrderStatus(no)
+  } catch {
+    payOrder.value = null
+  }
+}
+
+function payStatusText(status: number | undefined): string {
+  if (status === PayStatus.PAYED) return '渠道已支付'
+  if (status === PayStatus.NO_PAY) return '渠道未支付'
+  if (status === PayStatus.CLOSED) return '已关闭'
+  return '—'
+}
+
+function payStatusType(status: number | undefined): 'success' | 'warning' | 'info' {
+  if (status === PayStatus.PAYED) return 'success'
+  if (status === PayStatus.NO_PAY) return 'warning'
+  return 'info'
 }
 
 /**
@@ -123,6 +170,8 @@ async function pollUntilSettled(): Promise<boolean> {
   for (let i = 0; i < 15; i++) {
     await new Promise((r) => setTimeout(r, 1000))
     await loadOrder()
+    // 顺手刷新渠道侧状态：它比订单状态更"先知道"，能看到 MQ 在路上的那一段
+    await loadPayOrderStatus()
     if (order.value && order.value.status !== OrderStatus.NO_PAY) return true
   }
   return false
@@ -130,6 +179,7 @@ async function pollUntilSettled(): Promise<boolean> {
 
 async function handleRefresh() {
   await loadOrder()
+  await loadPayOrderStatus()
   if (!canPay.value) settled.value = true
 }
 </script>
@@ -185,6 +235,22 @@ async function handleRefresh() {
           <div v-else-if="creating" class="pay-meta">正在创建支付单…</div>
           <div v-else class="pay-meta">支付单创建失败，可
             <el-button link type="primary" @click="createPay">重试</el-button>
+          </div>
+
+          <!-- M7-12：支付单状态（渠道侧）—— 与订单状态并排看，能一眼区分"钱没到"和"MQ 在路上" -->
+          <div v-if="payOrder" class="pay-order-status" data-testid="pay-order-status">
+            <span class="pos-label">渠道侧支付单</span>
+            <el-tag size="small" :type="payStatusType(payOrder.status)" data-testid="pay-order-status-tag">
+              {{ payStatusText(payOrder.status) }}
+            </el-tag>
+            <span class="pos-item">金额 {{ formatPrice(payOrder.amount) }}</span>
+            <span class="pos-item">渠道 {{ payOrder.payChannelCode || '—' }}</span>
+            <span v-if="payOrder.paySuccessTime" class="pos-item">
+              支付成功于 {{ formatDateTime(payOrder.paySuccessTime) }}
+            </span>
+            <span v-if="payOrder.expireTime" class="pos-item">
+              过期 {{ formatDateTime(payOrder.expireTime) }}
+            </span>
           </div>
         </div>
 
@@ -300,6 +366,27 @@ async function handleRefresh() {
 
 .reused {
   color: var(--el-color-success);
+}
+
+/* M7-12：渠道侧支付单状态 */
+.pay-order-status {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.pos-label {
+  color: var(--el-text-color-secondary);
+}
+
+.pos-item {
+  color: var(--el-text-color-regular);
 }
 
 .pay-right {

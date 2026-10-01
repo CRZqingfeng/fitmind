@@ -37,7 +37,7 @@ const REGRESS_DIR = resolve(FRONTEND, '..', 'logs', 'regress-web')
 //   验的是「两端的 refreshToken Cookie 不会互相覆盖」（#A2）。
 //   其余脚本都给每个身份开独立 Context —— 而那种隔离**恰好掩盖**了这个 bug
 //   （Cookie 按 domain 隔离、不含端口；localStorage 按 origin 隔离、含端口）。
-const ALL = ['m7-1', 'm7-2', 'm7-3', 'm7-4', 'm7-5', 'm7-6', 'm7-7', 'm7-8', 'm7-10', 'm8-2a', 'm8-2c']
+const ALL = ['m7-1', 'm7-2', 'm7-3', 'm7-4', 'm7-5', 'm7-6', 'm7-7', 'm7-8', 'm7-10', 'm7-12a', 'm7-12b', 'm7-12c', 'm8-2a', 'm8-2c']
 
 // ------------------------------------------------------------
 // 参数

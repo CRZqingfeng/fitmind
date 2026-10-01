@@ -94,16 +94,11 @@ public class UserCouponServiceImpl extends ServiceImpl<UserCouponMapper, UserCou
         // 1. ★ 算法校验（不查库）：格式错或校验码对不上都会在这里抛异常
         long serialNum = CodeUtil.parseCode(code);
 
-        // 2. ★ bitmap 判断并标记已兑换：SETBIT 返回的是**旧值**，
-        //    旧值为 true 说明别人已经兑换过了 —— 这是幂等/防重的关键
-        Boolean before = redisTemplate.opsForValue()
-                .getBit(PromotionConstants.COUPON_CODE_MAP_KEY, serialNum);
-        if (Boolean.TRUE.equals(before)) {
-            throw new BizIllegalException(PromotionErrorInfo.Msg.CODE_EXCHANGED);
-        }
-        exchangeCodeService.markExchanged(serialNum);
-
-        // 3. 查出这张券
+        // 2. ★★ 【只读校验全部前置】—— 这里是 #A17 的修复点。
+        //    下面 4 步**只读、不写任何东西**，所以"失败也没有副作用"，放前面是安全的。
+        //    原实现是「先置位、后校验」，而置位写的是 Redis、回滚的是 MySQL，
+        //    **Redis 不参与 MySQL 事务** → 校验一失败，码就被永久吃掉：
+        //    券没发出去，用户拿着同一个码也再也换不了。
         Long couponId = exchangeCodeService.queryTargetId(serialNum);
         if (couponId == null) {
             throw new BizIllegalException(PromotionErrorInfo.Msg.CODE_INVALID);
@@ -119,7 +114,26 @@ public class UserCouponServiceImpl extends ServiceImpl<UserCouponMapper, UserCou
             throw new BizIllegalException(PromotionErrorInfo.Msg.COUPON_EXPIRED);
         }
 
-        saveUserCoupon(coupon, userId);
+        // 3. ★ 原子抢占：一次 SETBIT 同时完成"判重 + 置位"。
+        //    false = 这个码已经被别人兑换过 → 幂等拦截（防重放/防并发双发）。
+        if (!exchangeCodeService.markExchanged(serialNum)) {
+            throw new BizIllegalException(PromotionErrorInfo.Msg.CODE_EXCHANGED);
+        }
+
+        // 4. 发券。★ 失败必须**把码放回去**（补偿），否则就是又一次"码被吃掉"：
+        //    此时券没发出去，而 bit 已经置位，用户重试也只会得到"已被使用"。
+        //    ⚠️ 已知局限：这里只能兜住方法体内的异常；若异常发生在**事务提交那一刻**
+        //       （提交时才 flush 出约束冲突），补偿不会执行。要严格一致得上
+        //       Redis Lua 原子脚本 + 定期对账，本项目按"补偿式"处理即可（见 #A17）。
+        try {
+            saveUserCoupon(coupon, userId);
+        } catch (RuntimeException e) {
+            exchangeCodeService.releaseExchanged(serialNum);
+            log.warn("兑换码发券失败，已释放占位：userId={}, serialNum={}, couponId={}, cause={}",
+                    userId, serialNum, couponId, e.getMessage());
+            throw e;
+        }
+
         log.info("兑换码兑换成功：userId={}, code={}, serialNum={}, couponId={}",
                 userId, code, serialNum, couponId);
     }

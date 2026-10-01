@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { Delete, Download, Refresh, Search, Upload } from '@element-plus/icons-vue'
+import { Collection, Delete, Download, EditPen, Plus, Refresh, Search, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 
 import {
   checkBeforeUpShelf,
@@ -36,6 +37,21 @@ const rows = ref<CoursePageVO[]>([])
 const total = ref(0)
 const categories = ref<CategoryVO[]>([])
 const acting = ref<string | null>(null)
+const router = useRouter()
+
+/**
+ * ★ 判断一门课**能不能编辑 / 配题**。
+ *
+ * 依据是"数据在哪张表"：草稿表里的课（待上架 1 / 下架 3）才能编辑，
+ * 而正式表里的（已上架 2 / 已完结 4）**改不了** ——
+ * 因为建课接口全都读 `course_draft`，而 `upShelf` 已经把草稿删了。
+ * 所以已上架的课要先"下架"（下架会把正式数据反向复制回草稿）再编辑。
+ *
+ * 这与"题目只存在于草稿态"是同一条约束的两面，所以"配题"用的是同一个判断。
+ */
+function canEdit(status: number | null): boolean {
+  return status === COURSE_STATUS.DRAFT || status === COURSE_STATUS.OFF_SHELF
+}
 
 const query = reactive({
   pageNo: 1,
@@ -231,6 +247,16 @@ onMounted(async () => {
         <el-button type="primary" :icon="Search" @click="query.pageNo = 1; load()">查询</el-button>
         <el-button :icon="Refresh" @click="resetQuery">重置</el-button>
 
+        <!-- ★ M7-12 第 2 期：建课入口（原来只能看/上下架，不能新建） -->
+        <el-button
+          type="success"
+          :icon="Plus"
+          data-testid="course-new"
+          @click="router.push({ name: 'course-edit' })"
+        >
+          新建课程
+        </el-button>
+
         <span class="total-hint" data-testid="course-total">共 {{ total }} 门</span>
       </div>
 
@@ -305,8 +331,56 @@ onMounted(async () => {
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="340" fixed="right">
           <template #default="{ row }">
+            <!--
+              ★★ 编辑 / 配题只在**草稿态**的课上可用（待上架 / 下架）。
+                 已上架与已完结的课给的是**禁用态 + 原因**，而不是干脆藏起来：
+                 藏起来用户会以为"这个页面没这功能"，禁用 + tooltip 才说得清"为什么现在不行"。
+            -->
+            <el-tooltip
+              v-if="canEdit(row.status)"
+              content="继续填写建课向导（5 步：基本信息/目录/视频/小测/教练）"
+              placement="top"
+            >
+              <el-button
+                link
+                type="primary"
+                :icon="EditPen"
+                data-testid="course-edit"
+                @click="router.push({ name: 'course-edit-id', params: { id: row.id } })"
+              >
+                继续填写
+              </el-button>
+            </el-tooltip>
+            <el-tooltip
+              v-else
+              content="已上架 / 已完结的课程要先「下架」才能编辑（建课接口只读草稿表）"
+              placement="top"
+            >
+              <span>
+                <el-button link disabled :icon="EditPen" data-testid="course-edit-disabled">
+                  继续填写
+                </el-button>
+              </span>
+            </el-tooltip>
+
+            <el-tooltip
+              v-if="canEdit(row.status)"
+              content="给训练动作配小测（题目只存在于草稿态，上架后不可改）"
+              placement="top"
+            >
+              <el-button
+                link
+                type="primary"
+                :icon="Collection"
+                data-testid="course-subjects"
+                @click="router.push({ name: 'subjects', query: { courseId: row.id } })"
+              >
+                配题
+              </el-button>
+            </el-tooltip>
+
             <el-button
               v-if="row.status !== COURSE_STATUS.ON_SHELF"
               link

@@ -84,7 +84,14 @@ export async function uploadMedia(
   if (!sig?.uploadUrl) throw new Error('没拿到上传地址')
 
   onStage?.('② 上传视频…')
-  const mime = file.type || guessMime(file.name)
+  /**
+   * ★★ Content-Type 的取值优先级（M9-1）：
+   *   ① `sig.contentType` —— 后端签名时用的那个值。OSS（V4）把 Content-Type 纳入签名，
+   *      前端**必须原样带上**，否则 403 SignatureDoesNotMatch。这是唯一可靠的来源。
+   *   ② 兜底：`file.type`（浏览器给的）→ 再兜底按扩展名猜。
+   *      只有 MinIO 模式（后端不回传 contentType）才会走到这里，行为与改造前一致。
+   */
+  const mime = sig.contentType || file.type || guessMime(file.name)
   await putToMinio(sig.uploadUrl, file, mime, (p) => onProgress?.(p))
 
   onStage?.('③ 读取时长并确认…')
@@ -92,4 +99,92 @@ export async function uploadMedia(
   await confirmUpload(sig.mediaId, { duration })
 
   return String(sig.mediaId)
+}
+
+// ============================================================
+// M7-12：通用文件（图片）上传 —— 与视频**不是同一条链路**
+// ============================================================
+
+/**
+ * 文件业务类型（对应后端 `fm-media` 的 `BizType` 枚举）。
+ *
+ * ★ 它的作用不只是分类：**决定了对象落在桶里的目录前缀**，
+ *   而前缀又决定「能不能匿名读」（见 M8-1 对 `#B3` 的收窄）：
+ *
+ *   | 前缀 | 匿名读 |
+ *   |---|---|
+ *   | `avatar/` `course-cover/` `action-cover/` `media-cover/` `common/` | ✅ 允许 |
+ *   | `media/` 下的图片（按扩展名） | ⚠️ 折中放行 |
+ *   | `media/` 下的视频 | ✗ 必须预签名 |
+ *
+ *   → 所以**头像/封面这类"要长期用 `<img>` 直接显示"的图，必须走这里**，
+ *     而不是走 `uploadMedia`（后者落 `media/`，只能靠扩展名折中兜住）。
+ */
+export type FileBizType = 'avatar' | 'course-cover' | 'action-cover' | 'media-cover' | 'common'
+
+/**
+ * `POST /ms/files` 的返回（后端 `FileDTO`）。
+ *
+ * ★★ 两个地址字段必须分清，**存错会"过一会儿变破图"**：
+ *   · `url`    —— **带签名、有有效期**，适合"临时看一眼"
+ *   · `rawUrl` —— 不带签名的原始地址，**要长期存进 `icon` / `coverUrl` 的必须是它**
+ *
+ *   这与 M7 §12.6 第 4 条拒绝"用预签名做封面"的理由同源：
+ *   "预签名 URL 有有效期，图片会过一会儿变破图 —— 一个有时好有时坏的封面比
+ *    一直走兜底的更难排查"。
+ */
+export interface UploadedFile {
+  /** Long → string（全局约定） */
+  id: string
+  filename: string
+  /** 带签名的访问地址，**有有效期** */
+  url: string
+  /** 不带签名的原始地址（★ 入库用这个） */
+  rawUrl: string
+  size: number
+}
+
+/**
+ * 上传图片（服务端中转的 multipart，**不是**预签名直传）。
+ *
+ * 后端 `FileController` 的类注释说明了为什么图片走中转、视频走直传：
+ * "图片体积不大，走服务端中转即可；视频走 {@link MediaController} 的预签名直传。"
+ *
+ * ⚠️ **不要手写 `Content-Type: multipart/form-data`** ——
+ *    multipart 需要 `boundary`，手写一个不带 boundary 的头会让后端解析不出文件。
+ *    这里交给浏览器/axios 自己依据 `FormData` 生成（axios 1.x 会自动补 boundary）。
+ *
+ * @param onProgress 上传进度（0~100）。小图其实很快，但头像也可能是一张几 MB 的原图，
+ *                   没有进度用户会以为没反应。
+ */
+export function uploadImage(
+  file: File,
+  bizType: FileBizType = 'common',
+  onProgress?: (percent: number) => void,
+): Promise<UploadedFile> {
+  const fd = new FormData()
+  fd.append('file', file)
+  return http.post<UploadedFile>('/ms/files', fd, {
+    params: { bizType },
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
+    },
+  })
+}
+
+/** 获取文件信息（返回带签名的可访问地址） */
+export function getFileInfo(id: string): Promise<UploadedFile> {
+  return http.get<UploadedFile>(`/ms/files/${id}`)
+}
+
+/**
+ * 删除文件。
+ *
+ * ⚠️ ★ 后端 `DELETE /files/{id}` **没有归属校验**（已登记为 `#A14`）——
+ *    任何登录用户都能删**别人**上传的文件。
+ *    所以前端只在自己"换了头像、要清理刚上传的那张旧图"时调用它，
+ *    且**只删本次上传返回的 id**，不要把它做成一个"任意 id 都能删"的入口。
+ */
+export function deleteFile(id: string): Promise<void> {
+  return http.delete<void>(`/ms/files/${id}`)
 }

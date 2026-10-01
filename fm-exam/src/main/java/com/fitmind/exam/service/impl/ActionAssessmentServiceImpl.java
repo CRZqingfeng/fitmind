@@ -8,7 +8,6 @@ import com.fitmind.api.constants.NoticeTemplateCode;
 import com.fitmind.api.client.user.UserClient;
 import com.fitmind.api.dto.message.NoticeSendDTO;
 import com.fitmind.api.dto.user.UserDTO;
-import com.fitmind.api.dto.user.UserDTO;
 import com.fitmind.common.domain.dto.PageDTO;
 import com.fitmind.common.domain.query.PageQuery;
 import com.fitmind.common.exceptions.BizIllegalException;

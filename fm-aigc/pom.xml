@@ -58,6 +58,7 @@
         <!-- 公共依赖（原由 fitmind 管理，这里自管） -->
         <hutool.version>5.8.36</hutool.version>
         <swagger.version>2.2.19</swagger.version>
+        <knife4j.version>4.5.0</knife4j.version>
         <mybatis-plus.version>3.5.9</mybatis-plus.version>
         <!--
           ★ M6-3 新增：ES 客户端版本必须和服务端同线（服务端是 7.17.22）。
@@ -161,6 +162,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <!-- 接口文档 -->
+        <dependency>
+            <groupId>com.github.xiaoymin</groupId>
+            <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
+            <version>${knife4j.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

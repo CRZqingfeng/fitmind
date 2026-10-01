@@ -6,7 +6,7 @@ import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 
-import { sendCode } from '@/api/auth'
+import { resetPasswordByCode, sendCode } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { LOGIN_TYPE_CODE, LOGIN_TYPE_PASSWORD } from '@/types/user'
 import { ApiError } from '@/utils/request'
@@ -19,10 +19,13 @@ const auth = useAuthStore()
 const mode = ref<'code' | 'password'>('code')
 
 const formRef = ref<FormInstance>()
+/**
+ * ★ 手机号支持从 query 预填：
+ *   - 注册成功后会带 `?phone=` 跳回登录页（注册接口不返回 token，所以必须让用户登录一次）
+ *   - 否则用学员演示账号方便直接体验
+ */
 const form = reactive({
-  /** ⚠️ 用户端只允许【学员】账号登录（后端 UserServiceImpl.queryUserDetail 会校验），
-   *  管理员/教练请用管理端 —— 这里预填学员测试账号，方便直接体验 */
-  cellPhone: '13800010001',
+  cellPhone: typeof route.query.phone === 'string' && route.query.phone ? route.query.phone : '13800010001',
   /** 验证码或密码：两种模式共用一个字段，避免多写一个 state */
   credential: '',
   rememberMe: true,
@@ -128,6 +131,99 @@ async function handleLogin() {
     loading.value = false
   }
 }
+
+// ==================== M7-12：忘记密码 ====================
+
+/**
+ * 忘记密码 —— 走 `PUT /us/students/password`（后端 `StudentFormDTO`，**与注册共用同一个 DTO**）。
+ *
+ * ★ 为什么做成弹窗而不是独立页面：
+ *   它和登录是"同一件事的两种走法"（都是"我要进去"），用户在登录页找不到密码时，
+ *   最自然的动作是就地重置，而不是跳走再跳回来。跳走还会丢掉 redirect 参数。
+ *
+ * ★ 重置成功后**不自动登录**：后端这一步只改密码、不发 token。
+ *   而且"改完密码还自动进去了"会让人不确定密码到底改成功没有 —— 让他用新密码登一次，是最清楚的证明。
+ */
+const forgotVisible = ref(false)
+const forgotFormRef = ref<FormInstance>()
+const forgotForm = reactive({ cellPhone: '', code: '', password: '' })
+const forgotLoading = ref(false)
+const forgotSending = ref(false)
+const forgotError = ref('')
+
+const forgotRules: FormRules = {
+  cellPhone: [
+    { required: true, message: '请输入手机号', trigger: 'blur' },
+    { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' },
+  ],
+  code: [{ required: true, message: '请输入验证码', trigger: 'blur' }],
+  password: [
+    { required: true, message: '请设置新密码', trigger: 'blur' },
+    { min: 6, message: '密码至少 6 位', trigger: 'blur' },
+  ],
+}
+
+function openForgot() {
+  forgotError.value = ''
+  // 把登录页已经填的手机号带过去（用户多半就是登不进的那个号）
+  forgotForm.cellPhone = form.cellPhone
+  forgotForm.code = ''
+  forgotForm.password = ''
+  forgotVisible.value = true
+}
+
+async function handleForgotSendCode() {
+  forgotError.value = ''
+  const ok = await forgotFormRef.value
+    ?.validateField('cellPhone')
+    .then(() => true)
+    .catch(() => false)
+  if (!ok) return
+
+  forgotSending.value = true
+  try {
+    const code = await sendCode(forgotForm.cellPhone)
+    if (code) {
+      forgotForm.code = code
+      ElMessage.success(`Mock 模式：验证码已自动填充（${code}）`)
+    } else {
+      ElMessage.success('验证码已发送，请查收短信')
+    }
+  } catch (e) {
+    forgotError.value = e instanceof ApiError ? e.message : '验证码发送失败'
+  } finally {
+    forgotSending.value = false
+  }
+}
+
+async function handleForgotSubmit() {
+  forgotError.value = ''
+  const valid = await forgotFormRef.value
+    ?.validate()
+    .then(() => true)
+    .catch(() => false)
+  if (!valid) return
+
+  forgotLoading.value = true
+  try {
+    // ⚠️ name 是注册用的字段，这里不传（后端会忽略）
+    await resetPasswordByCode({
+      cellPhone: forgotForm.cellPhone,
+      code: forgotForm.code,
+      password: forgotForm.password,
+    })
+    ElMessage.success('密码已重置，请用新密码登录')
+    // 顺手把手机号与新密码填进登录表单，减少一次输入
+    form.cellPhone = forgotForm.cellPhone
+    form.credential = forgotForm.password
+    mode.value = 'password'
+    forgotVisible.value = false
+  } catch (e) {
+    forgotError.value = e instanceof ApiError ? e.message : '重置失败，请稍后重试'
+  } finally {
+    forgotLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -213,6 +309,17 @@ async function handleLogin() {
         </el-button>
       </el-form>
 
+      <!-- M7-12：忘记密码（弹窗重置，就地完成，不丢 redirect） -->
+      <div class="login-extra">
+        <el-link data-testid="login-forgot" type="info" :underline="false" @click="openForgot">
+          忘记密码？
+        </el-link>
+        <span class="extra-divider">|</span>
+        <el-link data-testid="login-go-register" type="primary" :underline="false" @click="router.push('/register')">
+          注册新账号
+        </el-link>
+      </div>
+
       <el-alert class="login-hint" type="info" title="本地开发提示" :closable="false" show-icon>
         <div class="hint-body">
           <p>Mock 模式下验证码由后端直接返回并自动填充，无需短信。</p>
@@ -220,6 +327,66 @@ async function handleLogin() {
         </div>
       </el-alert>
     </div>
+
+    <el-dialog
+      v-model="forgotVisible"
+      title="重置密码"
+      width="400px"
+      append-to-body
+      data-testid="forgot-dialog"
+    >
+      <el-form
+        ref="forgotFormRef"
+        :model="forgotForm"
+        :rules="forgotRules"
+        label-width="72px"
+        @submit.prevent="handleForgotSubmit"
+      >
+        <el-form-item label="手机号" prop="cellPhone">
+          <el-input v-model="forgotForm.cellPhone" data-testid="forgot-phone" placeholder="注册时的手机号" />
+        </el-form-item>
+        <el-form-item label="验证码" prop="code">
+          <div class="code-row">
+            <el-input v-model="forgotForm.code" data-testid="forgot-code" placeholder="验证码" />
+            <el-button
+              data-testid="forgot-send-code"
+              :disabled="countdown > 0"
+              :loading="forgotSending"
+              @click="handleForgotSendCode"
+            >
+              {{ countdown > 0 ? `${countdown}s` : '获取验证码' }}
+            </el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="新密码" prop="password">
+          <el-input
+            v-model="forgotForm.password"
+            data-testid="forgot-password"
+            type="password"
+            placeholder="至少 6 位"
+            show-password
+          />
+        </el-form-item>
+        <el-alert
+          v-if="forgotError"
+          type="error"
+          :title="forgotError"
+          :closable="false"
+          show-icon
+        />
+      </el-form>
+      <template #footer>
+        <el-button @click="forgotVisible = false">取消</el-button>
+        <el-button
+          data-testid="forgot-submit"
+          type="primary"
+          :loading="forgotLoading"
+          @click="handleForgotSubmit"
+        >
+          确认重置
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -294,6 +461,20 @@ async function handleLogin() {
 
 .login-hint {
   margin-top: 20px;
+}
+
+/* M7-12：忘记密码 / 注册 的入口行 */
+.login-extra {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.extra-divider {
+  color: var(--el-border-color);
 }
 
 .hint-body {

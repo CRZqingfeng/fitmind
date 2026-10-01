@@ -9,12 +9,28 @@
 #        "请先停掉它再启动，否则你会拿到一个'看似新启动、实际是旧 jar'的服务"
 #      —— 本项目就因此在旧代码上反复验证了好几轮。
 #
-#   2. ★★ Windows 上 `taskkill //F //PID` 会报「无效参数/选项 - '//F'」。
-#      这个 shell **不做 MSYS 路径转换**，所以要用**单斜杠**：
-#          taskkill /F /PID 1234
-#      同理 `tasklist //FI "PID eq 1234"` 也会失效 ——
-#      它不会报错，只是**过滤条件被忽略**，于是 grep 找不到 PID，
-#      你会误判成「进程已退出」。★ 所以判断进程死活一律以**端口**为准。
+#   2. ★★★ 2026-09-24 最终结论：**不要用 taskkill 杀进程，用 PowerShell 的 Stop-Process**
+#
+#      【踩过的三个坑，按时间顺序】
+#      (a) 原始注释写着「这个 shell **不做** MSYS 路径转换，用单斜杠 `taskkill /F` 即可」
+#          —— **错的**。MINGW64 Git Bash（含 WorkBuddy 内置的 PortableGit）**默认会转换**，
+#          `/F` 被改写成 `F:/` → 报「错误: 无效参数/选项 - 'F:/'」→ **每次都说停失败**。
+#          报错还被 `>/dev/null` 吞掉，只剩退出码非 0，于是端口一直不退、毫无线索。
+#      (b) 于是加 `MSYS_NO_PATHCONV=1` 局部关掉转换 —— **部分场景有效，但不稳定**：
+#          同一条命令行：shell 里直接跑**成功**（`成功: 已终止 PID 为 12580 的进程。`），
+#          放进本脚本执行却**失败**（同机器 / 同 shell / 同一 PID / 只差几分钟）。
+#          ⇒ "哪个环境变量能关掉转换"这件事**不可依赖**，别再赌。
+#      (c) 结论：**换成没有任何斜杠参数的手段**。
+#
+#      【现在的做法】
+#          powershell -NoProfile -Command "Stop-Process -Id <pid> -Force"
+#        · 一个斜杠参数都没有 → 路径转换无从下手 → 与用哪种 shell 无关
+#        · 成败只取决于"当前用户有没有权限杀这个进程"
+#        · 失败时会把**真实报错**打出来（不再丢进 /dev/null）
+#
+#      ⚠️ 同理不要用 `tasklist /FI "..."`：参数会被转换，而它的**过滤条件会被静默忽略**，
+#         于是 grep 找不到 PID，你会误判成「进程已退出」。
+#         ★★ 所以判断进程死活一律以**端口**为准（`/dev/tcp/127.0.0.1/<port>`），不看进程名。
 #
 #   3. `netstat -ano` 里同一个端口有多行：LISTENING（有 PID）+ 多条 TIME_WAIT（PID 为 0）。
 #      必须只取 LISTENING 那行，否则会去杀 PID 0。
@@ -94,16 +110,28 @@ for pair in $PAIRS; do
     fi
 
     for pid in $pids; do
-        # ★ 单斜杠！双斜杠会被当成无效参数
-        # ★★ 判成功用**退出码**，不要去 grep 输出文字：
-        #    taskkill 的输出是**本地化的**，而且 Windows 控制台下是 **GBK 编码** ——
-        #    `grep "成功"`（UTF-8）永远匹配不到，于是每次都会误报"停失败"
-        #    （端口探测能兜住，但报告是错的，会让人以为脚本坏了）。
-        if taskkill /F /PID "$pid" >/dev/null 2>&1; then
+        # ★★ 为什么用 PowerShell 的 Stop-Process，而不是 taskkill（2026-09-24 实测结论）★★
+        #
+        #   ① `taskkill /F /PID N` 里的 `/F` 会被 MINGW64 的 MSYS 路径转换改写成 `F:/`，
+        #      报「错误: 无效参数/选项 - 'F:/'」→ **每次都停不掉**。
+        #   ② 加 `MSYS_NO_PATHCONV=1` 在**部分场景**有效，但**实测不稳定**：
+        #      同一条命令行，在 shell 里直接跑**成功**（`成功: 已终止 PID 为 12580 的进程。`），
+        #      放进本脚本执行却**失败**（同机器、同 shell、同一 PID，前后只差几分钟）。
+        #      → 说明"哪个环境变量能关掉转换"这件事**不可依赖**。
+        #   ③ Stop-Process **没有任何斜杠参数**，路径转换无从下手 ——
+        #      成败只取决于当前用户有没有权限杀这个进程，与用哪种 shell 无关。
+        #
+        # ★ 判成功一律用**退出码**，不要去 grep 输出文字：
+        #   输出的语言与编码都随系统变（中文 GBK / 英文 UTF-8），grep 必然误报。
+        # ★ 失败时**必须把原因打出来**：这里以前把报错丢进 /dev/null，
+        #   结果用户只看到「停失败」而没有任何线索 —— 本次排查就为此多绕了一圈。
+        if err="$(powershell -NoProfile -Command "Stop-Process -Id $pid -Force" 2>&1)"; then
             echo "  ✅ 已停 $name (port=$port pid=$pid)"
             stopped=$((stopped + 1))
         else
             echo "  ❌ 停 $name 失败 (pid=$pid)"
+            printf '     %s\n' "$err" | grep -v '^[[:space:]]*$' | head -3 | sed 's/^/     /'
+            echo "     ↳ 常见原因：进程属于别的用户 / 权限更高 / 已经退出"
         fi
     done
 done

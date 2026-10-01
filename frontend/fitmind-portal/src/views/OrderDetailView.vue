@@ -4,8 +4,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 
-import { applyRefund, cancelOrder, getOrder } from '@/api/trade'
-import type { Order, OrderDetail } from '@/types/trade'
+import { applyRefund, cancelOrder, getOrder, getRefundByDetailId } from '@/api/trade'
+import type { Order, OrderDetail, RefundDetail } from '@/types/trade'
 import { OrderStatus } from '@/types/trade'
 import { formatDateTime, formatPrice, orderStatusTagType } from '@/utils/format'
 
@@ -16,6 +16,16 @@ import { formatDateTime, formatPrice, orderStatusTagType } from '@/utils/format'
  *   所以接口收的是 `courseId` 而不是明细 id —— 明细 id 用户根本看不到，
  *   让前端传一个拿不到的值，接口设计上就走不通。
  *   详见 `RefundFormDTO` 与 `applyRefund` 的注释。
+ *
+ * M7-12 补上**按明细反查退款**（`GET /ts/refund-apply/detail/{detailId}`）。
+ *
+ * ★ 为什么落在这里而不是"我的课程"页：后端 `@Operation` 写的是"我的课程页用"，
+ *   但**课表的 `LearningLesson` 里根本没有 `orderDetailId`**（实测字段只有
+ *   lessonId / courseId / 状态 / 进度 …）—— 拿不到明细 id 就调不了这个接口。
+ *   而订单详情的 `Order.details[].id` **恰好就是 orderDetailId**，
+ *   所以真正能把它用起来的地方是这里。
+ *   → 这也解释了它为什么值得存在：明细的 `status` 只到"退款中 / 已退款"，
+ *     而"被拒了、拒绝理由是什么"只有退款申请本身知道。
  */
 const route = useRoute()
 const router = useRouter()
@@ -54,11 +64,41 @@ async function load() {
   loading.value = true
   try {
     order.value = await getOrder(orderId.value)
+    // 明细拿到之后再并行反查各自的退款（见文件头注释：明细 id == orderDetailId）
+    await loadRefunds(order.value?.details ?? [])
   } catch {
     order.value = null
   } finally {
     loading.value = false
   }
+}
+
+/**
+ * 按订单明细并行反查退款申请（`GET /ts/refund-apply/detail/{detailId}`）。
+ *
+ * ★ 一次订单通常只有 1~3 条明细，所以"每个明细一次请求"是可接受的；
+ *   用 `Promise.all` 并行，不要让它们串行叠加延迟。
+ *
+ * ★ 返回 `null` 是**正常结果**（这门课没有退款申请），不是错误 ——
+ *   所以这里不弹任何提示，静默处理（接口也传了 `silent: true`）。
+ */
+const refunds = ref<Record<string, RefundDetail | null>>({})
+
+async function loadRefunds(details: OrderDetail[]) {
+  if (!details.length) {
+    refunds.value = {}
+    return
+  }
+  const pairs = await Promise.all(
+    details.map(async (d) => {
+      try {
+        return [d.id, await getRefundByDetailId(d.id)] as const
+      } catch {
+        return [d.id, null] as const
+      }
+    }),
+  )
+  refunds.value = Object.fromEntries(pairs)
 }
 
 function canRefund(detail: OrderDetail) {
@@ -197,6 +237,32 @@ function detailStatusText(status: number | null | undefined): string {
               >
                 {{ detailStatusText(detail.status) }}
               </el-tag>
+            </div>
+
+            <!-- M7-12：退款申请（按明细反查；没有申请时不显示任何东西） -->
+            <div v-if="refunds[detail.id]" class="detail-refund" data-testid="detail-refund-row">
+              <span class="refund-label">退款申请</span>
+              <el-tag size="small" data-testid="detail-refund-status">
+                {{ refunds[detail.id]?.statusDesc || '—' }}
+              </el-tag>
+              <span class="refund-amount-text">
+                {{ formatPrice(refunds[detail.id]?.refundAmount) }}
+              </span>
+              <el-link
+                type="primary"
+                :underline="false"
+                data-testid="detail-refund-link"
+                @click="router.push('/refunds')"
+              >
+                查看进度
+              </el-link>
+              <span
+                v-if="refunds[detail.id]?.approveOpinion"
+                class="refund-opinion"
+                :title="String(refunds[detail.id]?.approveOpinion)"
+              >
+                审批意见：{{ refunds[detail.id]?.approveOpinion }}
+              </span>
             </div>
           </div>
 
@@ -366,6 +432,33 @@ function detailStatusText(status: number | null | undefined): string {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   flex-wrap: wrap;
+}
+
+/* M7-12：明细下的退款申请行 */
+.detail-refund {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.refund-label {
+  color: var(--el-text-color-secondary);
+}
+
+.refund-amount-text {
+  font-weight: 600;
+  color: var(--el-color-danger);
+}
+
+.refund-opinion {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--el-text-color-secondary);
 }
 
 .detail-price {

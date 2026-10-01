@@ -63,6 +63,16 @@ dist-ssr/
 *.local
 frontend/**/pnpm-lock.yaml
 
+# ★★ 前端的 `.npmrc`：里面写死了本机 Git Bash 的绝对路径（`script-shell`）。
+#    它解决的是"本机 npm 派生的 cmd.exe 找不到 node、npm run dev 用不了"的问题，
+#      详见 docs/本地启动手册.md §2.4
+#    ⚠️ 之所以不入库：Windows 绝对路径提交后，会让 **Linux/macOS 上的 npm 完全跑不起来**
+#       （spawn 一个不存在的 .exe）。换机器需要自己重建这三个文件，位置：
+#         frontend/.npmrc · frontend/fitmind-portal/.npmrc · frontend/fitmind-admin/.npmrc
+#       ★ 三处都要放 —— npm 的 .npmrc 只从"最近的 package.json 所在目录"读，不向上越级。
+frontend/.npmrc
+frontend/*/.npmrc
+
 # ==================== 临时文件 ====================
 .tmp/
 *.tmp
@@ -83,3 +93,8 @@ deploy/upstream.txt
 
 # EdgeOne Makers 的项目关联状态（`edgeone makers link` 生成，属本地状态）
 .edgeone/
+
+# ==================== WorkBuddy 工作区记忆 ====================
+# 本项目目录下会生成 .workbuddy/memory/（日期日志 + 项目 MEMORY.md），
+# 属于**本机协作状态**、不是源码，不入库（M7-12 开工时补）。
+.workbuddy/

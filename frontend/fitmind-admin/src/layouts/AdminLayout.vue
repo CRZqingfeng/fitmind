@@ -3,7 +3,11 @@ import { computed, onMounted } from 'vue'
 
 import {
   ArrowDown,
+  Bell,
+  ChatDotRound,
+  Collection,
   DataLine,
+  Grid,
   MagicStick,
   Notebook,
   PriceTag,
@@ -36,6 +40,10 @@ const auth = useAuthStore()
 const menuIcons: Record<string, typeof User> = {
   dashboard: DataLine,
   courses: Notebook,
+  categorys: Grid,
+  subjects: Collection,
+  'community-audit': ChatDotRound,
+  notices: Bell,
   media: VideoCamera,
   refunds: RefreshLeft,
   coupons: PriceTag,

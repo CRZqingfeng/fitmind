@@ -18,7 +18,8 @@ import com.fitmind.media.mapper.MediaMapper;
 import com.fitmind.media.service.IMediaService;
 import com.fitmind.media.storage.IFileStorage;
 import com.fitmind.media.storage.IMediaStorage;
-import com.fitmind.media.storage.MinioProperties;
+import com.fitmind.media.storage.StorageProperties;
+import com.fitmind.media.utils.ContentTypeUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -39,7 +40,12 @@ public class MediaServiceImpl extends ServiceImpl<MediaMapper, Media> implements
 
     private final IMediaStorage mediaStorage;
     private final IFileStorage fileStorage;
-    private final MinioProperties properties;
+
+    /**
+     * ★ 与 {@code FileServiceImpl} 同理：只用到"签名有效期"这个与厂商无关的配置，
+     * 所以注入 {@link StorageProperties} 而不是 MinioProperties。
+     */
+    private final StorageProperties storageProperties;
 
     @Override
     public PageDTO<MediaVO> queryMediaPage(MediaQuery query) {
@@ -54,7 +60,7 @@ public class MediaServiceImpl extends ServiceImpl<MediaMapper, Media> implements
             MediaVO vo = new MediaVO();
             vo.setId(po.getId());
             vo.setFilename(po.getFilename());
-            vo.setCoverUrl(fileStorage.getAccessUrlByRawUrl(po.getCoverUrl(), properties.getPlayExpire()));
+            vo.setCoverUrl(fileStorage.getAccessUrlByRawUrl(po.getCoverUrl(), storageProperties.getPlayExpire()));
             vo.setDuration(po.getDuration());
             vo.setSize(po.getSize());
             vo.setUseTimes(po.getUseTimes());
@@ -86,9 +92,18 @@ public class MediaServiceImpl extends ServiceImpl<MediaMapper, Media> implements
         UploadSignatureDTO dto = new UploadSignatureDTO();
         dto.setMediaId(media.getId());
         dto.setKey(key);
-        dto.setUploadUrl(mediaStorage.getUploadUrl(key, properties.getUploadExpire(), size));
-        dto.setExpire(properties.getUploadExpire());
-        log.debug("生成上传签名：mediaId={}, key={}", media.getId(), key);
+        dto.setUploadUrl(mediaStorage.getUploadUrl(key, storageProperties.getUploadExpire(), size));
+        dto.setExpire(storageProperties.getUploadExpire());
+        /**
+         * ★★ 只有 OSS 需要回传 Content-Type：它的 V4 签名把 Content-Type 算进去了，
+         *   而浏览器直传一定会带这个头 —— 值不一致就是 403 SignatureDoesNotMatch。
+         *   MinIO 不签它，此处保持 null，前端沿用"自己按扩展名猜"的老行为，**行为不变**。
+         *   算值走 ContentTypeUtil，与 OssMediaStorage 签名时用的是同一个来源。
+         */
+        if (mediaStorage.requiresContentTypeOnUpload()) {
+            dto.setContentType(ContentTypeUtil.ofName(filename));
+        }
+        log.debug("生成上传签名：mediaId={}, key={}, contentType={}", media.getId(), key, dto.getContentType());
         return dto;
     }
 
@@ -128,8 +143,8 @@ public class MediaServiceImpl extends ServiceImpl<MediaMapper, Media> implements
         if (media == null) {
             throw new BizIllegalException(MediaErrorInfo.Msg.MEDIA_NOT_EXISTS);
         }
-        String url = mediaStorage.getPlayUrl(media.getFileId(), properties.getPlayExpire());
-        return PlayUrlVO.of(url, properties.getPlayExpire(), media.getDuration());
+        String url = mediaStorage.getPlayUrl(media.getFileId(), storageProperties.getPlayExpire());
+        return PlayUrlVO.of(url, storageProperties.getPlayExpire(), media.getDuration());
     }
 
     @Override
@@ -138,8 +153,8 @@ public class MediaServiceImpl extends ServiceImpl<MediaMapper, Media> implements
         if (media == null) {
             throw new BizIllegalException(MediaErrorInfo.Msg.MEDIA_NOT_EXISTS);
         }
-        String url = mediaStorage.getPlayUrl(media.getFileId(), properties.getPreviewExpire());
-        return PlayUrlVO.of(url, properties.getPreviewExpire(), media.getDuration());
+        String url = mediaStorage.getPlayUrl(media.getFileId(), storageProperties.getPreviewExpire());
+        return PlayUrlVO.of(url, storageProperties.getPreviewExpire(), media.getDuration());
     }
 
     @Override

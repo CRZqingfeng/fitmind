@@ -34,6 +34,30 @@ env_get() {
 }
 export MINIO_ACCESS_KEY="$(env_get MINIO_ROOT_USER)"
 export MINIO_SECRET_KEY="$(env_get MINIO_ROOT_PASSWORD)"
+
+# ==================== M9-1 对象存储可插拔（minio / oss 二选一） ====================
+# 切换：`FM_STORAGE_TYPE=oss bash scripts/start-group.sh fm-media`
+#
+# ⚠️ 这里**只在取值非空时才 export**（见 export_if_set）：
+#   环境变量一旦存在（哪怕是空串）就会**覆盖掉 yml 里的默认值**，
+#   于是 `bucket` 会变成空字符串 —— 表现为"上传到根目录 / 报错说不存在的桶"，
+#   排查起来跟存储配置完全不像。宁可让它落回 yml 的默认值。
+export_if_set() {
+    v="$(env_get "$2")"
+    [ -n "$v" ] && export "$1=$v"
+    return 0
+}
+export FM_STORAGE_TYPE="${FM_STORAGE_TYPE:-minio}"
+if [ "$FM_STORAGE_TYPE" = "oss" ]; then
+    # OSS 模式下桶名与 MinIO 不同，必须显式给
+    export_if_set FM_STORAGE_BUCKET OSS_BUCKET
+    export_if_set OSS_ENDPOINT OSS_ENDPOINT
+    export_if_set OSS_PUBLIC_ENDPOINT OSS_PUBLIC_ENDPOINT
+    export_if_set OSS_REGION OSS_REGION
+    export_if_set OSS_ACCESS_KEY_ID OSS_ACCESS_KEY_ID
+    export_if_set OSS_ACCESS_KEY_SECRET OSS_ACCESS_KEY_SECRET
+fi
+
 export RABBITMQ_USER="$(env_get RABBITMQ_USER)"
 export RABBITMQ_PASSWORD="$(env_get RABBITMQ_PASSWORD)"
 export XXL_JOB_ADMIN="http://127.0.0.1:9090/xxl-job-admin"

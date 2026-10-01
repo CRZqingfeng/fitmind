@@ -4,10 +4,12 @@ import type {
   Coupon,
   CouponDiscount,
   Order,
+  PayOrder,
   PayUrl,
   PlaceOrderResult,
   PrePlaceOrder,
   RefundApplyItem,
+  RefundDetail,
   RefundForm,
 } from '@/types/trade'
 import { http } from '@/utils/request'
@@ -196,4 +198,56 @@ export function previewDiscount(payload: {
       userCouponIds: payload.userCouponIds.join(','),
     },
   })
+}
+
+/**
+ * 用兑换码兑换优惠券（M7-12）。
+ *
+ * 后端 `@Operation` 原文："★ 用兑换码兑换"。
+ *
+ * ⚠️ 兑换码是**一次性**的 —— 同一个码第二次兑换后端会拒。
+ *    验收脚本要专门断言这一点（不能只看"第一次成功了"）。
+ */
+export function exchangeCouponByCode(code: string): Promise<void> {
+  return http.post<void>(`/prs/user-coupons/exchange/${encodeURIComponent(code)}`)
+}
+
+// ==================== 退款详情（M7-12）====================
+
+/**
+ * 退款详情（按退款申请 id）。
+ *
+ * ★ 与列表接口的区别不只是"字段更多"：详情里有**审批意见**与**渠道侧单号**，
+ *   这两样是用户点进详情唯一想看的东西。
+ */
+export function getRefundDetail(id: string): Promise<RefundDetail> {
+  return http.get<RefundDetail>(`/ts/refund-apply/${id}`)
+}
+
+/**
+ * 按**订单明细 id** 查最近一次退款（后端 `@Operation` 原文："我的课程页用"）。
+ *
+ * ★ 为什么"我的课程"需要它：课表里一条记录对应一个订单明细，
+ *   页面上要能直接显示"这门课我申请过退款、现在是待审批" —— 而课表里**没有**退款申请 id，
+ *   只有明细 id。所以这条路径是"从课程反查退款状态"的唯一入口。
+ *
+ * ⚠️ 返回 `data: null` 表示**这门课没有退款申请**（不是错误），调用方按空态处理。
+ */
+export function getRefundByDetailId(detailId: string): Promise<RefundDetail | null> {
+  return http.get<RefundDetail | null>(`/ts/refund-apply/detail/${detailId}`, { silent: true })
+}
+
+// ==================== 支付单状态（M7-12）====================
+
+/**
+ * 查询支付单状态（后端 `@Operation` 原文："前端轮询支付结果"）。
+ *
+ * ★★ 两个"反直觉"要点（都是读后端源码确认的）：
+ *   1. 返回的是**裸 PO**，`status` 取值 `1-未支付 / 2-已支付 / 3-已关闭`
+ *      （`PayConstants.PAY_STATUS_*`），不是订单状态那套编码
+ *   2. **查不到、或不是自己的支付单 → 都返回 `data: null`**（后端直接 return null，
+ *      不报错）。所以**不能靠 catch 判断"不存在"**，必须判 null
+ */
+export function getPayOrderStatus(payOrderNo: string): Promise<PayOrder | null> {
+  return http.get<PayOrder | null>(`/ps/pay-orders/${payOrderNo}`, { silent: true })
 }

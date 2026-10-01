@@ -51,4 +51,22 @@ public interface IMediaStorage {
 
     /** 批量删除视频 */
     void deleteFiles(List<String> keys);
+
+    /**
+     * 直传时，前端是否**必须原样回传**一个 Content-Type。
+     *
+     * <p>这是"存储后端差异"在接口层唯一需要暴露的一点，因为它是**前后端的契约**，
+     * 藏在实现里会让上层没法把正确的值告诉前端：</p>
+     * <ul>
+     *   <li><b>MinIO</b>：{@code false} —— SigV4 不把 Content-Type 纳入签名，
+     *       前端带什么值都行（历史上就是前端自己猜）。</li>
+     *   <li><b>阿里云 OSS（V4）</b>：{@code true} —— Content-Type 参与签名，
+     *       而浏览器直传 {@code File} 时一定会带它，所以必须由服务端算好、前端照带。</li>
+     * </ul>
+     *
+     * <p>默认 {@code false}，让"不关心这件事"的实现不用写多余代码。</p>
+     */
+    default boolean requiresContentTypeOnUpload() {
+        return false;
+    }
 }
