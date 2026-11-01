@@ -588,14 +588,33 @@ async function main() {
     items.filter((i) => num(i.kcal) !== kcalOf(priceMap.get(String(i.foodId)), num(i.gram)))
       .slice(0, 3).map((i) => `${i.foodName}:${i.kcal}≠${kcalOf(priceMap.get(String(i.foodId)), num(i.gram))}`).join(','))
 
+  // ★★ 2026-11-01（P3 全量导入）加 `p.source = 0`（只看**官方模板**）。
+  //   原来这三条是全表扫的。当时库里只有 3 个官方模板，所以"全表"和"官方"等价。
+  //   P2 之后库里多了 **AI 草稿**（source=2）：草稿是**按生成当时的食物价**算出来的，
+  //   食物库一调价（P3 把 1638 条的 kcal 全量重写了一遍），旧草稿必然对不上 ——
+  //   实测这正是本次回归红的原因（草稿里"香蕉（红皮）120g"还是 97 千卡，现价算 103）。
+  //   这不是功能坏了，是**断言的范围**没跟上：模板的账归 P1 管，
+  //   草稿的账归 P2/P3 自己管（它们的 preview 断言每次都新建草稿再算）。
   const db3 = sql(`SELECT CONCAT(
-      (SELECT COUNT(*) FROM (SELECT d.id FROM fm_plan.diet_plan_day d LEFT JOIN fm_plan.diet_plan_meal m ON m.diet_plan_day_id=d.id
+      (SELECT COUNT(*) FROM (SELECT d.id FROM fm_plan.diet_plan_day d
+        JOIN fm_plan.diet_plan p ON p.id = d.diet_plan_id
+        LEFT JOIN fm_plan.diet_plan_meal m ON m.diet_plan_day_id=d.id
+        WHERE p.source = 0
         GROUP BY d.id, d.kcal_total HAVING d.kcal_total <> COALESCE(SUM(m.kcal),0)) a),'/',
-      (SELECT COUNT(*) FROM (SELECT m.id FROM fm_plan.diet_plan_meal m LEFT JOIN fm_plan.diet_plan_meal_item i ON i.meal_id=m.id
+      (SELECT COUNT(*) FROM (SELECT m.id FROM fm_plan.diet_plan_meal m
+        JOIN fm_plan.diet_plan_day d ON d.id = m.diet_plan_day_id
+        JOIN fm_plan.diet_plan p ON p.id = d.diet_plan_id
+        LEFT JOIN fm_plan.diet_plan_meal_item i ON i.meal_id=m.id
+        WHERE p.source = 0
         GROUP BY m.id, m.kcal HAVING m.kcal <> COALESCE(SUM(i.kcal),0)) b),'/',
-      (SELECT COUNT(*) FROM (SELECT i.id FROM fm_plan.diet_plan_meal_item i JOIN fm_plan.food f ON f.id=i.food_id
-        WHERE i.kcal <> ROUND(f.kcal_per_100g * i.amount / 100)) c))`)
-  check('★ SQL 直查三层热量：天vs餐 / 餐vs食物项 / 食物项vs单价 全部 0 不一致', db3 === '0/0/0', db3)
+      (SELECT COUNT(*) FROM (SELECT i.id FROM fm_plan.diet_plan_meal_item i
+        JOIN fm_plan.diet_plan_meal m ON m.id = i.meal_id
+        JOIN fm_plan.diet_plan_day d ON d.id = m.diet_plan_day_id
+        JOIN fm_plan.diet_plan p ON p.id = d.diet_plan_id
+        JOIN fm_plan.food f ON f.id=i.food_id
+        WHERE p.source = 0 AND i.kcal <> ROUND(f.kcal_per_100g * i.amount / 100)) c))`)
+  check('★ SQL 直查三层热量（官方模板）：天vs餐 / 餐vs食物项 / 食物项vs单价 全部 0 不一致',
+    db3 === '0/0/0', db3)
 
   const badDay = await call('GET', `/diet/plans/${planId}?day=99`)
   check('查第 99 天 → 400 + 文案点名是哪一天', badDay.json?.code === 400

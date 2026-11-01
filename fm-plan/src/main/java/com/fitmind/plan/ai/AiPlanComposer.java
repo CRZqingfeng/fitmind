@@ -32,6 +32,7 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -128,7 +129,8 @@ public class AiPlanComposer {
     public TrainingResult composeTraining(Long planId, AiSkeletonNormalizer.Skeleton skeleton,
                                           Integer trainingLevel, LocalDate today, List<String> notes) {
         int maxDifficulty = maxDifficultyOf(trainingLevel);
-        Map<String, List<Exercise>> byPart = loadExercisesByPart();
+        ExercisePools pools = loadPools();
+        Map<String, List<Exercise>> byPart = pools.byPart();
         List<List<String>> groups = DIVISIONS.getOrDefault(skeleton.division(),
                 DIVISIONS.get(AiSkeletonNormalizer.DIVISION_THREE));
 
@@ -186,7 +188,7 @@ public class AiPlanComposer {
             // ★ 每天收尾加一个拉伸（1 组 60 秒）。
             //   不加的话「运动分布」永远是 100% 力量 —— 那不是"数据诚实"，是计划不合理：
             //   真实计划练完都会拉伸，何况数据集里本来就有 5 个拉伸动作可用。
-            Exercise stretch = pickStretch(byPart, i);
+            Exercise stretch = pickStretch(pools.stretches(), i);
             if (stretch != null) {
                 PlanDayItem stretchItem = new PlanDayItem()
                         .setPlanDayId(day.getId())
@@ -269,13 +271,10 @@ public class AiPlanComposer {
      * <p>为什么固定 1 组 60 秒：拉伸不需要"4 组 × 8 次"，那是力量动作的处方；
      * 而且 60 秒刚好让「预计分钟」多 1 分钟，与真实收尾时间接近。</p>
      */
-    private Exercise pickStretch(Map<String, List<Exercise>> byPart, int dayIndex) {
-        List<Exercise> all = byPart.values().stream()
-                .flatMap(List::stream)
-                .filter(e -> "拉伸".equals(e.getCategory()))
-                .sorted(java.util.Comparator.comparing(Exercise::getId))
-                .toList();
-        return all.isEmpty() ? null : all.get(Math.floorMod(dayIndex - 1, all.size()));
+    private Exercise pickStretch(List<Exercise> stretches, int dayIndex) {
+        // 池子在 loadPools 里已经筛好"只要拉伸"，这里不再按 category 过滤
+        // （★ 它就是"§7.1 过滤后拉伸消失"那个坑的补丁，别把这一步挪回调用方）
+        return stretches.isEmpty() ? null : stretches.get(Math.floorMod(dayIndex - 1, stretches.size()));
     }
 
     /** 训练水平 1~4 → 允许的最高动作难度（1 新手 / 3 中级 / 5 高级） */
@@ -286,15 +285,41 @@ public class AiPlanComposer {
         return trainingLevel == 3 ? 3 : 5;
     }
 
-    private Map<String, List<Exercise>> loadExercisesByPart() {
-        // 一次查全表（108 条）再内存分组：比"每个部位一次查询"少 N 次往返，
-        // 而且动作库本来就不大（全量 873 条也不到 1MB）
-        return exerciseMapper.selectList(Wrappers.<Exercise>lambdaQuery()
-                        .eq(Exercise::getStatus, 1)
-                        .orderByAsc(Exercise::getId))
-                .stream()
+    /**
+     * 两个池子：主项（力量）按部位分组 + 拉伸（收尾用）。
+     *
+     * <p><b>本方法最容易写错的地方：只查"力量"会连拉伸一起查没。</b>
+     * 收尾拉伸是从同一批数据里捞 {@code category='拉伸'} 的；如果 SQL 只写
+     * {@code .in(category, ["力量"])}，拉伸池就是空的 → 每个训练日少掉收尾 →
+     * 页面上"柔韧"占比变 0，而验收里的"拉伸项数 = 训练日数"会红。</p>
+     *
+     * <p>★ 为什么必须在 SQL 层按分类过滤（而不是取全表再过滤）：
+     * 全量 873 条里 123 条拉伸 / 14 条有氧 / 61 条弹跳。不过滤的话它们会混进
+     * "6 个主项"里 —— 这类变化<b>不报错、不报红，只是结果变得不像话</b>。</p>
+     */
+    private ExercisePools loadPools() {
+        // 一次查全表（873 条不到 1MB）再内存分组：比"每个部位一次查询"少 N 次往返
+        List<Exercise> all = exerciseMapper.selectList(Wrappers.<Exercise>lambdaQuery()
+                .eq(Exercise::getStatus, 1)
+                .in(Exercise::getCategory, List.of(PlanConstants.CATEGORY_STRENGTH,
+                        PlanConstants.CATEGORY_STRETCH))
+                .orderByAsc(Exercise::getId));
+
+        Map<String, List<Exercise>> byPart = all.stream()
+                .filter(e -> PlanConstants.CATEGORY_STRENGTH.equals(e.getCategory()))
                 .filter(e -> e.getBodyPart() != null)
                 .collect(Collectors.groupingBy(Exercise::getBodyPart, LinkedHashMap::new, Collectors.toList()));
+
+        List<Exercise> stretches = all.stream()
+                .filter(e -> PlanConstants.CATEGORY_STRETCH.equals(e.getCategory()))
+                .sorted(Comparator.comparing(Exercise::getId))
+                .toList();
+
+        return new ExercisePools(byPart, stretches);
+    }
+
+    /** 选材池：{@code byPart} 只含力量；{@code stretches} 只含拉伸（两者互补，见 loadPools） */
+    private record ExercisePools(Map<String, List<Exercise>> byPart, List<Exercise> stretches) {
     }
 
     // ==================== 饮食 ====================
@@ -520,9 +545,15 @@ public class AiPlanComposer {
     }
 
     private FoodPool loadFoodPool(Long userId) {
+        // ★ 按 sort 排序（而不是按 id）：这是"常见位"的同一口径 —— FoodServiceImpl 的
+        //   "常见"也是 `ORDER BY sort ASC, id ASC`。
+        //   P1 把导入行刻意写成 `sort = 10000 + i`，就是为了让**人工挑的那批**（sort 1~30）排在最前。
+        //   不按 sort 排的后果：全量 1638 条后，轮转下标会落到"奶粉""奶油"这类
+        //   不能按份吃的食材上，而"250g 一杯奶"这个份量假设只对液态奶成立。
         List<Food> all = foodMapper.selectList(Wrappers.<Food>lambdaQuery()
                 .eq(Food::getStatus, 1)
                 .and(w -> w.eq(Food::getOwnerId, 0).or().eq(Food::getOwnerId, userId))
+                .orderByAsc(Food::getSort)
                 .orderByAsc(Food::getId));
 
         List<Food> staples = new ArrayList<>();
@@ -568,17 +599,45 @@ public class AiPlanComposer {
                 }
             }
         }
-        // ★ 主食按热量密度排序后只留前 5 个：
-        //   马铃薯 77、玉米(鲜) 112 千卡/100g 这类"低密度主食"，一顿要吃到 600g 才够热量 ——
-        //   而 600g 土豆不是"一餐"，是一盆。用密度高的（米/面/燕麦 340~360）才能用
-        //   100~200g 的合理份量凑到目标，否则会出现"第 3 天整天差 14%"。
-        //   （马铃薯/玉米仍留在食物库里，用户自己记录饮食时照样能选到。）
-        staples.sort((a, b) -> Integer.compare(
-                b.getKcalPer100g() == null ? 0 : b.getKcalPer100g(),
-                a.getKcalPer100g() == null ? 0 : a.getKcalPer100g()));
-        List<Food> denseStaples = staples.size() > 5 ? new ArrayList<>(staples.subList(0, 5)) : staples;
+        // ★★ 三处"能按份吃"的门槛（M11-5 §7.4）。
+        //
+        //   起因：排餐逻辑写死了份量假设 —— 早餐"主食 100g + 蛋白 50g + 奶 250g"。
+        //   30 条种子时这些假设都成立（米面、鸡胸、牛奶）；1638 条时池子里混进了
+        //   奶粉（478）、奶油（350）、油面筋（492）、油饼（403）……
+        //   实测后果：第 4 天早餐 1296 千卡（目标 536），一周偏差 +43.5%，
+        //   而"只调主食克数"救不回来（它被夹在 40~400g 之间）。
+        //
+        //   ① 主食：排掉低密度（马铃薯 77 / 玉米 112 —— 一顿要吃 600g，那不是"一餐"是"一盆"），
+        //      再按 sort 取前 5（不再按密度降序：全量后密度最高的恰好是油面筋/油饼这种油炸点心）。
+        //   ② 奶：只留 ≤100 千卡/100g —— "250g" 是"一杯"的量，奶粉/奶油/黄油不能按杯算。
+        //   ③ 其余池子不动：轮转下标最大 6，只会用到 sort 最前的几条（人工挑的）。
+        //
+        //   ★ 这三条**不改算法、不加权重**，只是把"份量假设"重新变成真的；
+        //     30 条种子下池子与改动前完全一致（实测偏差 5.8% → 5.5%，同量级）。
+        List<Food> dense = new ArrayList<>(staples.size());
+        for (Food f : staples) {
+            Integer kcal = f.getKcalPer100g();
+            if (kcal != null && kcal >= 200) {
+                dense.add(f);
+            }
+        }
+        if (dense.isEmpty()) {
+            dense = staples;   // 库里全是低密度主食时，宁可给低密度也别"没主食"
+        }
+        List<Food> denseStaples = dense.size() > 5 ? new ArrayList<>(dense.subList(0, 5)) : dense;
 
-        return new FoodPool(denseStaples, proteins, vegetables, dairy, nuts, fruits);
+        List<Food> liquidDairy = new ArrayList<>(dairy.size());
+        for (Food f : dairy) {
+            Integer kcal = f.getKcalPer100g();
+            if (kcal != null && kcal <= 100) {
+                liquidDairy.add(f);
+            }
+        }
+        if (liquidDairy.isEmpty()) {
+            liquidDairy = dairy;
+        }
+
+        return new FoodPool(denseStaples, proteins, vegetables, liquidDairy, nuts, fruits);
     }
 
     // ==================== VO 组装 ====================

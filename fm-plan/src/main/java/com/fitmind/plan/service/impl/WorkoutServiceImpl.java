@@ -25,6 +25,7 @@ import com.fitmind.plan.mapper.UserPlanMapper;
 import com.fitmind.plan.mapper.WorkoutSessionMapper;
 import com.fitmind.plan.mapper.WorkoutSetLogMapper;
 import com.fitmind.plan.service.IWorkoutService;
+import com.fitmind.plan.utils.AssetUrls;
 import com.fitmind.plan.utils.LoginUser;
 import com.fitmind.plan.utils.PlanTimeEstimator;
 import com.fitmind.plan.utils.PlanVoAssembler;
@@ -168,7 +169,7 @@ public class WorkoutServiceImpl extends ServiceImpl<WorkoutSessionMapper, Workou
             vo.setItemId(item.getId());
             vo.setExerciseId(item.getExerciseId());
             vo.setExerciseName(exercise == null ? "动作已下架" : exercise.getName());
-            vo.setImageUrl(exercise == null ? null : exercise.getImageUrl());
+            vo.setImageUrl(exercise == null ? null : AssetUrls.toUrl(exercise.getImageUrl()));
             vo.setCategory(exercise == null ? null : exercise.getCategory());
             vo.setGroupType(item.getGroupType());
             vo.setGroupTypeLabel(PlanConstants.groupTypeLabel(item.getGroupType()));

@@ -70,7 +70,8 @@ public final class PlanVoAssembler {
         vo.setId(item.getId());
         vo.setExerciseId(item.getExerciseId());
         vo.setExerciseName(exercise == null ? "动作已下架" : exercise.getName());
-        vo.setImageUrl(exercise == null ? null : exercise.getImageUrl());
+        // ★ DB 存对象 key，出参给绝对地址（与动作库同一个换算点 AssetUrls）
+        vo.setImageUrl(exercise == null ? null : AssetUrls.toUrl(exercise.getImageUrl()));
         vo.setCategory(exercise == null ? null : exercise.getCategory());
         vo.setBodyPart(exercise == null ? null : exercise.getBodyPart());
         vo.setEquipment(exercise == null ? null : exercise.getEquipment());

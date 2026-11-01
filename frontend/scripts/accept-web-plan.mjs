@@ -206,8 +206,19 @@ async function main() {
   await page.goto(`${PORTAL}/plan/exercise-lib?planId=${ownPlanId}&dayId=${realDayId}`, {
     waitUntil: 'domcontentloaded',
   })
-  check('左侧一级分类有「全部」', !!(await waitText(page, '全部')))
-  check('左侧一级分类有「热身」', !!(await waitText(page, '热身')))
+  // ★★ 2026-11-01（P3 全量导入）改：字典已动态化。
+  //   旧断言写的是「左侧一级分类有『热身』」—— 那条结论的前提（"P3 导 876 条时热身自然会有"）
+  //   已被实测推翻：873 条里 category 没有任何热身值。现在字典只返回库里真有数据的分类，
+  //   "热身"从左侧栏**消失**才是正确行为；继续断言"有热身"，等于要求代码保留一个死入口。
+  // ★ 必须等左侧栏渲染出来：字典是进页面后才拉的，goto 完立刻读会拿到空数组
+  //   （第一版就是这么写的，结果"有全部/有拉伸"两条假红 —— 页面其实是对的）
+  await page.waitForSelector('.sidebar .side-item', { timeout: 15000 })
+  const sideItems = (await page.locator('.sidebar .side-item').allInnerTexts()).map((t) => t.trim())
+  check('左侧一级分类有「全部」', sideItems.includes('全部'), sideItems.join('/'))
+  check('★ 左侧**没有**「热身」（数据集无此分类 → 字典动态化后该入口应消失）',
+    !sideItems.includes('热身'), sideItems.join('/'))
+  check('左侧有「拉伸」「有氧」（这两类库里有数据）',
+    sideItems.includes('拉伸') && sideItems.includes('有氧'), sideItems.join('/'))
 
   // ★ 必须等骨架屏消失再断言：加载中 `.el-skeleton` 里没有任何按钮，
   //   这时候断言"按钮 ≥1"必然失败 —— 而那不是功能坏了，是脚本抢跑（假红）。
@@ -243,9 +254,15 @@ async function main() {
   const img404 = notFound.filter((u) => /\.(png|jpe?g|webp|gif)(\?|$)/i.test(u))
   const other404 = notFound.filter((u) => !api404.includes(u) && !img404.includes(u))
   check('★ 没有接口级 404（/pls/** 全部命中）', api404.length === 0, api404.slice(0, 2).join(' | '))
-  if (img404.length > 0) {
-    console.log(`  ℹ️ ${img404.length} 张动作图 404（外链 ghfast.top，本机可能被墙 → 遗留 #7）`)
-  }
+  // ★★ 2026-11-01（P3）改：这一条以前是 `console.log` 的"已知遗留"提示
+  //   （动作图走 ghfast.top 外链，本机被墙就 404）。P3 已把 1746 张图转存到对象存储、
+  //   DB 改存对象 key —— 遗留 #7 收尾，提示升级成**硬断言**。
+  //   ⚠️ 这条只覆盖"404"（notFound 按 `status() === 404` 收集）。
+  //      "200 但 Content-Type 是 binary/octet-stream → <img> 不渲染"那个坑，
+  //      由后端脚本 accept-plan-p3.mjs 断言（200 / image/jpeg / >10000 字节）——
+  //      前端这里拿不到响应头里的类型判断成本更高，分工即可。
+  check('★★ 动作图 0 张 404（P3 后图在对象存储里，不再是外链 → 遗留 #7 收尾）',
+    img404.length === 0, img404.slice(0, 3).join(' | '))
   if (other404.length > 0) {
     console.log(`  ℹ️ ${other404.length} 个非计划接口 404（假网关只转发 /pls/**，属测试环境局限）`)
     console.log(`     例：${other404[0].slice(0, 90)}`)

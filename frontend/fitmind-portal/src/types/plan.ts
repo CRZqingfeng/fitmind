@@ -80,11 +80,11 @@ export interface PlanOption {
 
 /** `GET /pls/exercises/dict` */
 export interface PlanDict {
-  /** 左侧栏分类（热身/拉伸/有氧，不含"力量"——力量类按部位切） */
+  /** 左侧栏分类：库里真有数据的分类，**不含"力量"**（力量按部位切）。P3 后实测只有 拉伸/有氧（数据集无"热身"） */
   categories: string[]
-  /** 11 个部位 */
+  /** 部位：11 个 + "其他"（数据集 neck 那 8 条），P3 后实测 12 个 */
   bodyParts: string[]
-  /** 8 类器械（史密斯/悍马机 P0 无数据） */
+  /** 器械：库里真有数据的（P3 后实测 6 类，**没有史密斯/悍马机** —— 数据集里根本没有这两类机器） */
   equipments: string[]
   goals: string[]
   difficulties: PlanOption[]

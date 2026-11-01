@@ -186,9 +186,26 @@ def r0(v):
 
 # ==================== 组装 ====================
 
+# ★ 名字里的"别名"只有 ［］/[] 这一种括号：
+#     `糯米［江米］`      → name 保留原文，alias = "江米"
+#     `小麦粉（富强粉，特一粉）` → （）里是**品种说明**，不是别名，留在 name 里不动
+#   为什么必须拆出来：FoodServiceImpl 的搜索是 `like(name) OR like(alias)`，
+#   用户搜的是"江米"这种常用叫法，而库里只有"糯米［江米］"——不拆就永远搜不到。
+ALIAS_PATTERN = re.compile(r"[［\[](.+?)[］\]]")
+
+
+def alias_of(name):
+    m = ALIAS_PATTERN.search(name)
+    if not m:
+        return None
+    a = m.group(1).strip()
+    return a or None
+
+
 def build_rows(data_by_file):
     rows, skipped, stats = [], [], {"ok": 0, "trace": 0, "missing": 0, "bad": 0}
     seen = {}
+    kept = {}
     for fname in FILES:
         category = CATEGORY_BY_FILE[fname]
         for e in data_by_file[fname]:
@@ -209,9 +226,23 @@ def build_rows(data_by_file):
                 skipped.append((fname, name, "热量为负"))
                 continue
 
+            seen[name] = seen.get(name, 0) + 1
+            # ★★ 重名**保留第一条**，后面的直接丢弃（不是塞进 INSERT 让 MySQL 的
+            #   ON DUPLICATE 决定谁赢）。
+            #
+            #   为什么必须显式定这个规则：数据集里存在同名不同值的行，最典型的是
+            #   `香蕉（红皮）` 有两条（86 与 81 千卡/100g）。种子 SQL 是在 Python 里
+            #   按"先读到的那条"算的营养值，"让 MySQL 决定"= 后写的那条赢 —— 两边不一致，
+            #   结果是 `diet_plan_meal_item.kcal` 与 `food.kcal_per_100g × amount` 对不上
+            #   （实测 P1 的三层对账因此红了 48 行）。
+            #   "先声明规则 + 两边同一规则"比"事后对账"便宜得多。
+            if name in kept:
+                continue
+            kept[name] = True
             rows.append({
                 "file": fname,
                 "name": name,
+                "alias": alias_of(name),
                 "category": category,
                 "kcal": max(0, r0(kcal)),
                 "protein": r1(p or 0),
@@ -219,12 +250,16 @@ def build_rows(data_by_file):
                 "fat": r1(f or 0),
                 "raw": (e.get("energyKCal"), e.get("protein"), e.get("CHO"), e.get("fat")),
             })
-            seen[name] = seen.get(name, 0) + 1
     dup = {k: v for k, v in seen.items() if v > 1}
     return rows, skipped, stats, dup
 
 
 def sql_str(s):
+    """字符串字面量。★ None 必须产出 `NULL` 而不是 `'None'` ——
+    第一版漏了这个判断，结果 1638 行的 alias 全是字符串 'None'（页面上看不出来，
+    但"搜别名"会把所有食物都搜出来）。"""
+    if s is None:
+        return "NULL"
     return "'" + str(s).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
@@ -232,23 +267,35 @@ def to_sql(rows):
     """生成幂等 upsert。用别名 `AS new`（MySQL 8.0.20+ 推荐写法，VALUES() 已废弃）"""
     out = []
     for i, r in enumerate(rows, start=1):
+        # ★ 全量数据只有"克"这一种单位 —— 数据集只给每 100g 的营养值，**没有份量信息**。
+        #   不按名字猜"1 个鸡蛋=50g"（那是编数据）。要"1 个/1 碗"走 P1 的"我的食物"自建。
         units = json.dumps([{"unit": "克", "gram": 1}], ensure_ascii=False)
         out.append(
-            "(%s, NULL, %s, %d, %s, %s, %s, %s, %s, %s, %d, 0, 1)" % (
-                sql_str(r["name"]), sql_str(r["category"]), r["kcal"],
+            "(%s, %s, %s, %d, %s, %s, %s, %s, %s, %s, %d, 0, 1)" % (
+                sql_str(r["name"]), sql_str(r["alias"]), sql_str(r["category"]), r["kcal"],
                 r["protein"], r["carb"], r["fat"],
                 sql_str(units), sql_str("克"), sql_str(EMOJI_BY_CATEGORY[r["category"]]),
-                i,
+                # ★ sort 从 10000 起：1~9999 留给**人工挑的"常见"位**（库里 30 条种子是 1~30）。
+                #   不偏移的后果：AnimalFat 是第 1 个文件，它的 7 条拿到 sort 1~7，
+                #   于是"常见"最前面变成 牛油（板油）/牛油（炼）/鸭油（炼）… 一排油。
+                #   —— 数据对了，推荐位废了。
+                10000 + i,
             )
         )
     head = ("INSERT INTO `%s` (`name`, `alias`, `category`, `kcal_per_100g`, `protein_per_100g`, "
             "`carb_per_100g`, `fat_per_100g`, `units_json`, `default_unit`, `emoji`, `sort`, "
             "`owner_id`, `status`) VALUES\n") % TABLE
+    # ★★ UPDATE 子句只写"数据集说了算"的列。
+    #   刻意**不写**下面三列，理由都是同一件事：它们是**人工判断**，数据集给不出：
+    #     · `sort`        —— 人工挑的"常见"排序（写了就覆盖成导入顺序）
+    #     · `units_json` / `default_unit` —— 人工配的份量（写了会把种子的"碗=40"覆盖成"只有克"，
+    #       进而让 P1 的「1 碗折算 40g」断言变红）
+    #     · `emoji`       —— 人工挑的图标（导入行按分类自动给，够用）
     tail = ("\nAS new ON DUPLICATE KEY UPDATE "
+            "`alias` = new.`alias`, "
             "`category` = new.`category`, `kcal_per_100g` = new.`kcal_per_100g`, "
             "`protein_per_100g` = new.`protein_per_100g`, `carb_per_100g` = new.`carb_per_100g`, "
-            "`fat_per_100g` = new.`fat_per_100g`, `emoji` = new.`emoji`, "
-            "`units_json` = new.`units_json`, `default_unit` = new.`default_unit`, "
+            "`fat_per_100g` = new.`fat_per_100g`, "
             "`status` = 1;")
     return head + ",\n".join(out) + tail
 
@@ -281,6 +328,12 @@ def report(rows, skipped, stats, dup, limit, will_write):
         print("\n⚠️ 数据里重名的 %d 个（同名只会留一条，upsert 按 name）：" % len(dup))
         for k, v in list(dup.items())[:8]:
             print("    - %s ×%d" % (k, v))
+
+    alias_rows = [r for r in rows if r.get("alias")]
+    print("\n别名（［］里的内容）：%d 条会写进 alias 列 —— 例如 %s"
+          % (len(alias_rows), "、".join(r["alias"] for r in alias_rows[:5])))
+    print("去重后可写 %d 条（同名只留 1 条）；导入后 food 行数 = 这个数与库里已有的并集"
+          % len({r["name"] for r in rows}))
 
     print("\n" + "=" * 74)
     print("前 %d 条（★ 请人眼核一遍：名字 / 分类 / 热量 / 三大营养素）" % min(20, len(rows)))

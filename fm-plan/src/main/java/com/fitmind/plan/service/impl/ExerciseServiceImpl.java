@@ -1,6 +1,7 @@
 package com.fitmind.plan.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -16,6 +17,8 @@ import com.fitmind.plan.domain.vo.ExerciseVO;
 import com.fitmind.plan.domain.vo.OptionVO;
 import com.fitmind.plan.mapper.ExerciseMapper;
 import com.fitmind.plan.service.IExerciseService;
+import com.fitmind.plan.utils.AssetUrls;
+import com.fitmind.plan.utils.DictOrder;
 import com.fitmind.plan.utils.LoginUser;
 import com.fitmind.plan.utils.PlanJsonUtils;
 import lombok.RequiredArgsConstructor;
@@ -83,7 +86,8 @@ public class ExerciseServiceImpl extends ServiceImpl<ExerciseMapper, Exercise> i
         vo.setHeat(exercise.getHeat());
         vo.setLumbarPressure(exercise.getLumbarPressure());
         vo.setGifUrl(exercise.getGifUrl());
-        vo.setImageUrl(exercise.getImageUrl());
+        // ★ DB 存对象 key，出参给绝对地址（唯一换算点见 AssetUrls）
+        vo.setImageUrl(AssetUrls.toUrl(exercise.getImageUrl()));
         vo.setPrimaryMuscles(PlanJsonUtils.toList(exercise.getPrimaryMusclesJson()));
         vo.setSecondaryMuscles(PlanJsonUtils.toList(exercise.getSecondaryMusclesJson()));
         vo.setSteps(PlanJsonUtils.toList(exercise.getStepsJson()));
@@ -94,9 +98,21 @@ public class ExerciseServiceImpl extends ServiceImpl<ExerciseMapper, Exercise> i
     @Override
     public DictVO queryDict() {
         DictVO vo = new DictVO();
-        vo.setCategories(PlanConstants.FILTER_CATEGORIES);
-        vo.setBodyParts(PlanConstants.BODY_PARTS);
-        vo.setEquipments(PlanConstants.EQUIPMENTS);
+        // ★★ 2026-11-01（P3）起字典**动态化**，与食物字典同一口径：
+        //    只返回库里真有数据的值。原因：全量 873 条后
+        //      · "热身" 仍然 0 条（数据集没有这个分类，不编）
+        //      · "史密斯/悍马机" 仍然 0 条（数据集没有这两类机器）
+        //    写死常量的话，左侧栏会留 3 个**永远空的死入口**，用户点了以为是 bug。
+        //    ⚠️ 别把这里改回常量：那样"点进去空列表"会重新出现，而且不会有任何报错。
+        List<String> categories = DictOrder.order(
+                distinctColumn("category").stream()
+                        // "力量"按**部位**切，它自己不是一级筛选（见 PlanConstants 类注释）
+                        .filter(c -> !PlanConstants.CATEGORY_STRENGTH.equals(c))
+                        .toList(),
+                PlanConstants.FILTER_CATEGORIES);
+        vo.setCategories(categories);
+        vo.setBodyParts(DictOrder.order(distinctColumn("body_part"), PlanConstants.BODY_PARTS));
+        vo.setEquipments(DictOrder.order(distinctColumn("equipment"), PlanConstants.EQUIPMENTS));
         vo.setGoals(PlanConstants.GOALS);
 
         List<OptionVO> difficulties = new ArrayList<>();
@@ -119,6 +135,17 @@ public class ExerciseServiceImpl extends ServiceImpl<ExerciseMapper, Exercise> i
         return vo;
     }
 
+    /**
+     * 某个列在**上架动作**里的全部取值（DISTINCT）。
+     *
+     * <p>★ 只查 status=1：下架的动作不该出现在筛选条件里（点进去必然是空列表）。</p>
+     */
+    private List<Object> distinctColumn(String column) {
+        return baseMapper.selectObjs(new QueryWrapper<Exercise>()
+                .select("DISTINCT `" + column + "`")
+                .eq("status", 1));
+    }
+
     private ExerciseVO toVo(Exercise exercise) {
         ExerciseVO vo = new ExerciseVO();
         vo.setId(exercise.getId());
@@ -128,7 +155,7 @@ public class ExerciseServiceImpl extends ServiceImpl<ExerciseMapper, Exercise> i
         vo.setBodyPart(exercise.getBodyPart());
         vo.setEquipment(exercise.getEquipment());
         vo.setDifficulty(exercise.getDifficulty());
-        vo.setImageUrl(exercise.getImageUrl());
+        vo.setImageUrl(AssetUrls.toUrl(exercise.getImageUrl()));
         return vo;
     }
 

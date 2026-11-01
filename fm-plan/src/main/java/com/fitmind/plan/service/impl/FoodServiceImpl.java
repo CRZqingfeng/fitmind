@@ -18,6 +18,7 @@ import com.fitmind.plan.domain.vo.FoodVO;
 import com.fitmind.plan.mapper.FoodFavoriteMapper;
 import com.fitmind.plan.mapper.FoodMapper;
 import com.fitmind.plan.service.IFoodService;
+import com.fitmind.plan.utils.DictOrder;
 import com.fitmind.plan.utils.FoodUnits;
 import com.fitmind.plan.utils.LoginUser;
 import lombok.RequiredArgsConstructor;
@@ -215,22 +216,9 @@ public class FoodServiceImpl extends ServiceImpl<FoodMapper, Food> implements IF
 
     /** 按固定顺序排分类；不认识的分类放到最后（防止导入脚本新增了分类就消失） */
     private List<String> orderCategories(List<Object> raw) {
-        List<String> found = raw.stream()
-                .filter(java.util.Objects::nonNull)
-                .map(String::valueOf)
-                .collect(Collectors.toList());
-        found.sort((a, b) -> {
-            int ia = DietConstants.FOOD_CATEGORY_ORDER.indexOf(a);
-            int ib = DietConstants.FOOD_CATEGORY_ORDER.indexOf(b);
-            if (ia < 0) {
-                ia = Integer.MAX_VALUE;
-            }
-            if (ib < 0) {
-                ib = Integer.MAX_VALUE;
-            }
-            return Integer.compare(ia, ib);
-        });
-        return found;
+        // ★ 实现在 DictOrder（动作字典也用同一套）：三处各写一份的话，
+        //   迟早有一处忘了"未列出的追加在后"，左侧栏顺序就会随 MySQL 返回顺序抖动。
+        return DictOrder.order(raw, DietConstants.FOOD_CATEGORY_ORDER);
     }
 
     private void requireVisible(Long foodId, Long userId) {
