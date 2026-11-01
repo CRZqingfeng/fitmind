@@ -1,5 +1,8 @@
 import type { PageDTO } from '@/types/course'
 import type {
+  AiApplyResult,
+  AiPreview,
+  AiTarget,
   BodyMetric,
   DietLogCreated,
   DietPlanCard,
@@ -368,4 +371,46 @@ export function recordBodyMetric(payload: {
 /** 当前体征（没有则尝试用用户档案兜底；needProfile=true 表示连档案也没有） */
 export function getLatestBodyMetric(): Promise<BodyMetric> {
   return http.get<BodyMetric>('/pls/body/metrics/latest')
+}
+
+// ==================== AI 定制计划（M11-4 / P2） ====================
+
+/**
+ * 目标推算（当前 → 目标、预计达成日、7 天折线）。
+ *
+ * 失败形态：`needProfile=true` 时不会 4xx，而是返回一堆 null —— 页面显示"先记录体重"。
+ */
+export function aiTarget(): Promise<AiTarget> {
+  return http.get<AiTarget>('/pls/plans/ai/target')
+}
+
+/**
+ * 生成预览（写两份草稿）。
+ *
+ * ★ 入参就是 `planSkeleton()` 的出参原样（全部可空；空 = 全用规则默认）。
+ * ★ 这一步**会写库**（草稿），但草稿不会出现在「我的计划」里 —— 只有 apply 才发布。
+ * ★ 业务校验失败是 HTTP 200 + code 400（例如"先记录一次体重"），不是 4xx。
+ */
+export function aiPreview(payload: {
+  skeletonId?: string
+  division?: string
+  weeklyFrequency?: number
+  intensity?: string
+  mealSplit?: { mealType: number; ratio: number }[]
+  dietAdvice?: string
+  trainingAdvice?: string
+  targetTip?: string
+  degraded?: boolean
+}): Promise<AiPreview> {
+  return http.post<AiPreview>('/pls/plans/ai/preview', payload)
+}
+
+/**
+ * 接受预览：草稿发布 + 立刻「执行本计划」。
+ *
+ * ★ 只传 previewId —— 服务端不认前端传的 planId（否则可以接受别人的草稿）。
+ * ★ 幂等：连点两次返回同样的三个 id，不会建两条 user_plan。
+ */
+export function aiApply(previewId: string): Promise<AiApplyResult> {
+  return http.post<AiApplyResult>('/pls/plans/ai/apply', { previewId })
 }

@@ -20,6 +20,15 @@ public enum AgentType {
     BUY("buy", "购买引导"),
     /** ★ 健身知识问答：真正的 RAG（训练/营养/康复的知识性问题） */
     KNOWLEDGE("knowledge", "健身知识问答"),
+    /**
+     * ★ 定制计划骨架（M11-4 / P2）。
+     *
+     * <p><b>它不是一个"路由目标"</b>：只由 {@code POST /plan/skeleton} 这个专属接口调用。
+     * 所以 {@link #parse(String)} 里要把它排除掉（与 ROUTE 同理）——
+     * 否则用户在聊天里说"帮我定制个计划"，路由模型可能输出 PLAN，
+     * 于是那段"给前端解析的 JSON"会被当成回答直接念给用户看。</p>
+     */
+    PLAN("plan", "定制计划"),
     ;
 
     /** 小写标识：用于 prompt 文件名、Nacos dataId、落库的 agent_type */
@@ -61,9 +70,10 @@ public enum AgentType {
         }
         String text = modelOutput.trim().toUpperCase();
 
-        // ① 英文枚举名（先排除 ROUTE —— 它不是合法的路由结果）
+        // ① 英文枚举名（排除 ROUTE 与 PLAN —— 它们都不是合法的路由结果）
+        //   ★ PLAN 必须排除：它的输出是"给前端解析的 JSON"，被路由到就等于把 JSON 念给用户
         for (AgentType v : values()) {
-            if (v != ROUTE && text.contains(v.name())) {
+            if (v != ROUTE && v != PLAN && text.contains(v.name())) {
                 return v;
             }
         }

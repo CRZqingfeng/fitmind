@@ -62,6 +62,11 @@ fm:
         #    UserContext 拿不到 userId，拦截器会把管理员也挡在外面（401），
         #    而症状是"管理员访问管理端接口竟然说未登录"——很难联想到是白名单问题
         - /admin/**
+        # ★ M11-4：定制计划骨架（POST /plan/skeleton）必须登录 ——
+        #   它内部要用 UserContext 读身体档案，匿名时 userId 为 null，
+        #   表现成"所有用户都被提示去填档案"，而排查时几乎不会联想到白名单。
+        #   （与 P1 漏配 /diet/** 是同一个坑，那次也是这个症状。）
+        - /plan/**
       excludeLoginPaths:
         - /health
 

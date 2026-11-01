@@ -32,6 +32,11 @@ public class PlanErrorInfo {
         /** 参数：训练日名 */
         public static final String DAY_NO_ITEM = "「%s」还没有动作，先给它加一个动作再执行";
 
+        // ==================== P2：AI 定制 ====================
+        public static final String AI_NEED_PROFILE = "先记录一次体重，我才能算出你的热量预算和达成时间";
+        public static final String AI_PREVIEW_EXPIRED = "预览已过期，请重新生成";
+        public static final String AI_PREVIEW_NOT_MINE = "这不是你的预览";
+
         // ==================== 训练日 ====================
 
         public static final String DAY_NOT_EXISTS = "训练日不存在，它可能已经被删除了";

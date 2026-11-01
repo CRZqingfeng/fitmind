@@ -11,6 +11,18 @@ public final class AigcConstants {
     private AigcConstants() {
     }
 
+    // ==================== 定制计划骨架（M11-4 / P2） ====================
+
+    /**
+     * 骨架请求的标记 —— 写在 {@code prompts/plan.txt} 的第一行。
+     *
+     * <p>★ <b>Mock 通道靠它识别"这一轮要的是 JSON"</b>：
+     * Mock 是按 prompt 形态决定输出的，没有这个标记，骨架请求会落到
+     * "按关键词生成一段健身回答"的分支，前端拿到的就是一段散文，解析必然失败
+     * —— 而在 mock 下所有自动化验收都要跑，所以这条分支必须存在。</p>
+     */
+    public static final String PLAN_SKELETON_MARK = "[PLAN_SKELETON]";
+
     // ==================== 模型通道 ====================
 
     /** DeepSeek（真实模型，OpenAI 兼容协议） */

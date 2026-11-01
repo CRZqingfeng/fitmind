@@ -170,10 +170,9 @@ async function startToday() {
   }
 }
 
-/** 「定制计划」在 P2（AI 定制）才开放 —— 明确告知，而不是给个点了没反应的按钮 */
+/** 「定制计划」→ AI 结果页（M11-4 / P2 起已接通） */
 function goCustom() {
-  ElMessage.info('定制计划将在 P2（AI 定制）开放，先自己编排一个吧')
-  createEmpty()
+  router.push('/plan/ai')
 }
 
 async function createEmpty() {

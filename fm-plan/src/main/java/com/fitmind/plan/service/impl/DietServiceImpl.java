@@ -396,20 +396,8 @@ public class DietServiceImpl implements IDietService {
      * 用户根本分不清 10:00 那次和 21:00 那次。</p>
      */
     private String mealLabel(Integer mealType, Integer mealIndex) {
-        int type = mealType == null ? DietConstants.MEAL_BREAKFAST : mealType;
-        String base = type >= 1 && type <= DietConstants.MEAL_LABELS.size()
-                ? DietConstants.MEAL_LABELS.get(type - 1) : "餐";
-        // ★ 加餐**一律带序号**：第一顿也要显示"加餐①"。
-        //   第一版写的是 "mealIndex <= 1 就不带序号"，结果详情页出现
-        //   "加餐 10:00 / 加餐② 15:30 / 加餐③ 21:00" —— 三顿加餐里唯一没编号的那一顿，
-        //   反而最像是漏了编号，用户会以为它是"正餐"。
-        if (type != DietConstants.MEAL_SNACK) {
-            return base;
-        }
-        int index = mealIndex == null || mealIndex < 1 ? 1 : mealIndex;
-        String[] circles = {"①", "②", "③", "④", "⑤"};
-        int idx = Math.min(index - 1, circles.length - 1);
-        return base + circles[idx];
+        // ★ 实现在 DietConstants.labelOf（P2 的 AI 预览也要用同一套标签）
+        return DietConstants.labelOf(mealType, mealIndex);
     }
 
     /** LocalTime → "07:30"（★ 前端不要再切："07:30:00" 直接渲染会多两个零） */

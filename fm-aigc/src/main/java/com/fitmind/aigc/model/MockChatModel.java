@@ -92,6 +92,24 @@ public class MockChatModel implements ChatModel {
      */
     public static final String DEGRADED_KB_MARK = "（知识库这次没能查，以上是通用建议）";
 
+    /**
+     * 定制计划骨架的确定性输出（M11-4）。
+     *
+     * <p>★★ <b>这份 JSON 必须和 {@code PlanSkeletonServiceImpl.parse()} 的校验口径完全对齐</b>
+     * （枚举值、周频 1~7、六个餐次、ratio 之和正好 1）。
+     * 它一旦写错，mock 通道下 P2 会表现为"每次都降级"，而日志里只有一句
+     * "骨架解析失败"—— 看起来像模型不行，其实是 mock 的样例数据不合规。</p>
+     */
+    public static final String PLAN_SKELETON_ANSWER = """
+            {"division":"三分化","weeklyFrequency":4,"intensity":"MEDIUM",
+             "mealSplit":[{"mealType":1,"ratio":0.25},{"mealType":4,"ratio":0.05},
+                          {"mealType":2,"ratio":0.30},{"mealType":4,"ratio":0.05},
+                          {"mealType":3,"ratio":0.30},{"mealType":4,"ratio":0.05}],
+             "dietAdvice":"你每周能练 4 次，属于能稳定推进的节奏：每天把蛋白吃够，训练日多加一份碳水。",
+             "trainingAdvice":"按上下肢拆开练，隔天练一次，每次先把大动作做标准再谈重量。",
+             "targetTip":"按每周 0.25~0.75 公斤的节奏走，比冲两周停三周靠谱得多。"}
+            """;
+
     /** Mock 认识的全部工具名（兜底判定用，见 {@link #availableTools}） */
     private static final List<String> KNOWN_TOOLS = List.of(
             "queryMyBodyProfile", "searchCourses", "queryCourseDetail", "prePlaceOrder");
@@ -201,6 +219,20 @@ public class MockChatModel implements ChatModel {
         if (userText.contains(CMD_ERROR)) {
             log.info("[Mock通道] 按指令模拟模型服务异常");
             return new MockPlan("", new RuntimeException("模拟模型服务异常"), 0, List.of());
+        }
+
+        // ★ M11-4：定制计划**骨架**请求 —— 认 prompt 里的 [PLAN_SKELETON] 标记。
+        //
+        //   必须排在"分类 / 工具 / 拒答 / 普通回答"之前：这个请求的 user 消息里
+        //   全是"训练""计划""蛋白"这类词，被普通回答分支接走就会返回一段散文，
+        //   而接口要的是 JSON —— 前端 JSON.parse 直接失败。
+        //   （这正是"Mock 没覆盖 = 这条链路在验收里没真跑"的典型场景。）
+        //
+        //   CMD_ERROR / CMD_TIMEOUT 在更前面，所以"模型报错 → 降级"那条路径也覆盖得到：
+        //   调用方把 [MOCK:ERROR] 放进备注里即可。
+        if (prompt.getContents().contains(AigcConstants.PLAN_SKELETON_MARK)) {
+            log.info("[Mock通道] 识别为定制计划骨架请求 → 返回确定性骨架 JSON");
+            return new MockPlan(PLAN_SKELETON_ANSWER, null, props.getMock().getChunkDelayMs(), List.of());
         }
 
         // ★ M6-5：摘要任务（上下文压缩）—— 必须排在"按关键词生成回答"之前。

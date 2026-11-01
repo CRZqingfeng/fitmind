@@ -82,7 +82,12 @@ public interface PlanConstants {
      */
     List<String> EQUIPMENTS = List.of("徒手", "哑铃", "杠铃", "史密斯", "悍马机", "固定器械", "弹力带", "其他");
 
-    List<String> GOALS = List.of("增肌", "减脂");
+    /** ★ 目标字符串抽成常量：P2 的目标推算、骨架回落都要判断"是增肌还是减脂"，
+     *  散落各处的字面量迟早会有一次写成"减脂 "（带空格）而静默不匹配 */
+    String GOAL_GAIN = "增肌";
+    String GOAL_LOSS = "减脂";
+
+    List<String> GOALS = List.of(GOAL_GAIN, GOAL_LOSS);
 
     /** 难度标签，下标即 difficulty 值 */
     List<String> DIFFICULTY_LABELS = List.of("新手", "进阶", "专业");

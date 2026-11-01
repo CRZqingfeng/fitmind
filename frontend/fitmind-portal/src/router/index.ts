@@ -166,6 +166,14 @@ const routes: RouteRecordRaw[] = [
       },
       // ==================== M11-3 饮食（P1）====================
       // ★ 三个页面都从「计划 → 饮食」tab 里进，不占菜单（菜单仍是 10 项）
+      // ==================== M11-4 AI 定制（P2）====================
+      // 结果页是一次性的（previewId 在内存里），刷新会重新生成一份预览
+      {
+        path: 'plan/ai',
+        name: 'plan-ai',
+        component: () => import('@/views/PlanAiView.vue'),
+        meta: { title: 'AI 定制计划', hideInMenu: true },
+      },
       {
         path: 'plan/food-lib',
         name: 'plan-food-lib',

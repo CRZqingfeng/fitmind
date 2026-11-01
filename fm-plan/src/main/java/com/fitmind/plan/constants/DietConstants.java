@@ -61,4 +61,27 @@ public interface DietConstants {
 
     String GOAL_GAIN = "增肌";
     String GOAL_LOSS = "减脂";
+
+    /** 加餐序号用的圈码（最多 5 顿，再多 UI 也放不下） */
+    String[] SNACK_CIRCLES = {"\u2460", "\u2461", "\u2462", "\u2463", "\u2464"};
+
+    /**
+     * 餐次展示名 —— **全模块唯一实现**。
+     *
+     * <p>★ P1 时这段逻辑写在 {@code DietServiceImpl} 里（private）；
+     * P2 的 AI 预览要生成同样的标签，若再写一份，就会出现
+     * "详情页写「加餐①」、预览页写「加餐」"这种同一份数据两种叫法。
+     * 所以抽到这里，两边都调它。</p>
+     *
+     * <p>★ 加餐**一律带序号**，第一顿也是「加餐①」：不编号的那一顿看起来最像正餐。</p>
+     */
+    static String labelOf(Integer mealType, Integer mealIndex) {
+        int type = mealType == null ? MEAL_BREAKFAST : mealType;
+        String base = type >= 1 && type <= MEAL_LABELS.size() ? MEAL_LABELS.get(type - 1) : "餐";
+        if (type != MEAL_SNACK) {
+            return base;
+        }
+        int index = mealIndex == null || mealIndex < 1 ? 1 : mealIndex;
+        return base + SNACK_CIRCLES[Math.min(index - 1, SNACK_CIRCLES.length - 1)];
+    }
 }

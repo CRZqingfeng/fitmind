@@ -17,6 +17,7 @@ import type {
   QuotaView,
 } from '@/types/ai'
 import type { PageDTO } from '@/types/course'
+import type { PlanSkeleton } from '@/types/plan'
 import http from '@/utils/request'
 import { streamChat, type StreamChatOptions, type StreamHandle } from '@/utils/sse'
 
@@ -117,3 +118,28 @@ export function getPrompts(): Promise<Record<string, string>> {
  *   放在学员可调的位置等于开了一个演示事故的口子。
  * → 它们的归宿是管理端的「AI 运营」页（M7-8），那里本来就要求管理员登录。
  */
+
+// ==================== 定制计划骨架（M11-4 / P2） ====================
+
+/**
+ * 生成计划骨架（fm-aigc）。
+ *
+ * ★ 它只返回"选哪种分化 / 一周几练 / 强度 / 餐次比例 + 三句文案"，
+ *   **不含任何动作、食物、日期、热量** —— 那些由 fm-plan 从库里选。
+ *
+ * ★ 失败不阻断：AI 那步挂了，直接调 `aiPreview({})` 仍能拿到规则版计划，
+ *   只是文案变成模板句（见 `advice.degraded`）。
+ *
+ * 失败形态：配额用完 → HTTP 200 + code 400（文案"今天的 AI 次数用完了…"）。
+ */
+export function planSkeleton(payload: {
+  goalType?: number
+  weeklyFrequency?: number
+  trainingLevel?: number
+  note?: string
+  weightKg?: number
+  targetWeightKg?: number
+  heightCm?: number
+} = {}): Promise<PlanSkeleton> {
+  return http.post<PlanSkeleton>('/ais/plan/skeleton', payload)
+}

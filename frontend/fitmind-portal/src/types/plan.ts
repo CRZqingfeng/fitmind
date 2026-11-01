@@ -513,3 +513,105 @@ export interface BodyMetric {
   /** 来自 fm-user 的档案兜底（不是本模块记的） */
   fromProfile: boolean
 }
+
+// ==================== AI 定制计划（M11-4 / P2） ====================
+
+/**
+ * 目标推算（结果页 ① 目标卡）。
+ *
+ * ★ 所有数字都是后端算好的：前端**不算**达成日期、不算每周变化量、不算折线。
+ *   前端只做一件事：把 kg 乘 2 显示成"斤"（唯一换算点 `utils/format.ts`）。
+ */
+export interface AiTarget {
+  currentWeightKg: number | null
+  targetWeightKg: number | null
+  currentBmi: number | null
+  weeklyDeltaKg: number | null
+  /** 0 = 已达成；null = 缺目标体重，无法推算 */
+  daysToGoal: number | null
+  targetDate: string | null
+  /** 永远 7 个点；缺目标时是一条水平线 */
+  forecast: AiForecastPoint[]
+  /** true = 连体重都没有 → 引导去记录体重，而不是显示 0 */
+  needProfile: boolean
+  fromProfile: boolean
+}
+
+export interface AiForecastPoint {
+  date: string
+  weightKg: number
+}
+
+export interface AiMacroItem {
+  key: 'protein' | 'carb' | 'fat'
+  label: string
+  gram: number
+  kcal: number
+  percent: number
+}
+
+export interface AiEvaluation {
+  heightCm: number | null
+  weightKg: number | null
+  targetWeightKg: number | null
+  bmi: number | null
+  bmiLabel: string | null
+  /** BMI 在刻度条上的位置 0~1（后端算，前端只画） */
+  bmiPercent: number | null
+}
+
+export interface AiDistribution {
+  strength: number
+  cardio: number
+  flexibility: number
+}
+
+export interface AiAdvice {
+  dietAdvice: string | null
+  trainingAdvice: string | null
+  targetTip: string | null
+  /** true = AI 那步失败/超时，已用规则骨架；页面提示"建议稍后重新生成" */
+  degraded: boolean
+  /** 服务端的补充说明（动作库不够之类的实话） */
+  notes: string[]
+}
+
+/** 预览结果（结果页 4 个区块的全部数据） */
+export interface AiPreview {
+  previewId: string
+  planDraftId: string
+  dietDraftId: string
+  target: AiTarget
+  evaluation: AiEvaluation
+  macros: { kcalBudget: number; items: AiMacroItem[] }
+  planTitle: string
+  difficultyLabel: string
+  dietPlanTitle: string
+  dietCycleDays: number
+  dietDays: DietPlanDay[]
+  trainDays: PlanDay[]
+  distribution: AiDistribution
+  advice: AiAdvice
+}
+
+/** fm-aigc 生成的骨架（AI 只出这一份东西，不含任何 id） */
+export interface PlanSkeleton {
+  skeletonId: string
+  /** true = 连体重都没有，前端应引导去补档案/记体重 */
+  needProfile: boolean
+  degraded: boolean
+  division: string
+  weeklyFrequency: number
+  intensity: 'LOW' | 'MEDIUM' | 'HIGH'
+  mealSplit: { mealType: number; ratio: number }[]
+  dietAdvice: string
+  trainingAdvice: string
+  targetTip: string
+}
+
+/** 接受预览的结果（三个 id 都有 = 已经真的加入我的计划了） */
+export interface AiApplyResult {
+  planId: string
+  userPlanId: string
+  dietPlanId: string
+}
