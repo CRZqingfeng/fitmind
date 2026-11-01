@@ -46,9 +46,37 @@ public class PageQuery {
     @Schema(description = "排序字段", example = "id")
     private String sortBy;
 
+    /**
+     * 页码 —— **null 时回落默认值**（《待修复问题清单》#A28 的第二条）。
+     *
+     * <p>★ 为什么要自己写 getter（Lombok 已经会生成一个）：字段上写了
+     * {@code private Integer pageNo = 1} 也没用 —— 前端只要传一个**空值**
+     * （`?pageNo=`，比如某个筛选表单清空后仍带着参数），Spring 的 WebDataBinder
+     * 会把空串转成 {@code null}，**直接覆盖掉字段默认值**。
+     * 之后 {@code from()} 里 `(pageNo - 1)` 自动拆箱 → NPE →
+     * 被全局兜底成 500「系统繁忙」。实测：`/pls/exercises?pageNo=` 曾经就是 500。</p>
+     *
+     * <p>放在 getter 这一层兜底，是为了让<b>所有</b>调用方（`from()`、`toMpPage()`
+     * 以及 16 个服务里各自的用法）不用各写一遍判空。</p>
+     */
+    public Integer getPageNo() {
+        return pageNo == null ? DEFAULT_PAGE_NUM : pageNo;
+    }
+
+    /**
+     * 每页大小 —— null 时回落默认值（理由同 {@link #getPageNo()}）。
+     *
+     * <p>★ <b>只兜 null，不兜 0/负数</b>：本项目里 {@code pageSize=0} 在别处有语义
+     * （{@code fm-search} 用它表示"不算总页数"），顺手 coerce 会悄悄改掉那个行为。
+     * 修 bug 时不要捎带改语义 —— 那是另一件事。</p>
+     */
+    public Integer getPageSize() {
+        return pageSize == null ? DEFAULT_PAGE_SIZE : pageSize;
+    }
+
     /** 分页起始位置（手写 SQL 的 limit 用） */
     public int from() {
-        return (pageNo - 1) * pageSize;
+        return (getPageNo() - 1) * getPageSize();
     }
 
     /**
@@ -58,7 +86,8 @@ public class PageQuery {
      */
     @SuppressWarnings("unchecked")
     public <T> Page<T> toMpPage(OrderItem... orderItems) {
-        Page<T> page = new Page<>(pageNo, pageSize);
+        // ★ 用 getter 而不是字段：空值回落默认值（见 getPageNo 的注释）
+        Page<T> page = new Page<>(getPageNo(), getPageSize());
         // 1. 手动指定了排序方式，以手动的为准
         if (orderItems != null && orderItems.length > 0) {
             for (OrderItem orderItem : orderItems) {
@@ -87,7 +116,7 @@ public class PageQuery {
             sortBy = defaultSortBy;
             this.isAsc = isAsc;
         }
-        Page<T> page = new Page<>(pageNo, pageSize);
+        Page<T> page = new Page<>(getPageNo(), getPageSize());
         OrderItem orderItem = new OrderItem();
         orderItem.setAsc(this.isAsc);
         orderItem.setColumn(sortBy);
