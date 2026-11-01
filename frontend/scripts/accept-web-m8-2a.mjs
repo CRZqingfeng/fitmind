@@ -50,6 +50,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { chromium } from 'playwright'
+import { launchBrowser } from './_cdp-browser.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SHOT_DIR = join(HERE, '..', '..', 'docs', 'screenshots')
@@ -254,16 +255,8 @@ async function forceRefreshByBadToken(page, { tokenKey, url, readySelector }) {
  *   网络受限时会卡住 —— 而"脚本跑不起来"和"功能坏了"是两件完全不同的事。
  *   Windows 自带 Edge，用 channel 直接驱动它即可（同一套 Chromium 内核）。
  */
-async function launchBrowser() {
-  try {
-    return await chromium.launch()
-  } catch (err) {
-    const message = String(err?.message ?? '')
-    if (!/Executable doesn't exist/i.test(message)) throw err
-    console.log('  ⚠️ 未找到 Playwright 自带 Chromium，回退使用系统 Edge（channel=msedge）')
-    return await chromium.launch({ channel: 'msedge' })
-  }
-}
+// ★ 浏览器连接统一见 ./_cdp-browser.mjs —— 本机必须走 CDP，
+//   `chromium.launch({ channel: 'msedge' })` 在这里一定失败（见模块头部说明）。
 
 async function main() {
   console.log('============================================================')

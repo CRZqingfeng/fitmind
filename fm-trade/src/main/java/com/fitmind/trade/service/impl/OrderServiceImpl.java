@@ -270,7 +270,7 @@ public class OrderServiceImpl extends ServiceImpl<TradeOrderMapper, TradeOrder> 
         // 第一道：状态机（防写错代码）。非法流转直接抛，不静默
         OrderStatus target = OrderStatus.of(update.getStatus());
         OrderStatus.checkTransfer(expect, target);
-        // 第二道：条件更新（防并发 + 天然幂等）
+        // 第二道：乐观锁，条件更新（防并发 + 天然幂等）
         return baseMapper.changeStatus(update, expect.getValue()) > 0;
     }
 

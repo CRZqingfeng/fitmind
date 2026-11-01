@@ -40,6 +40,8 @@
         <module>fm-exam</module>
         <module>fm-data</module>
         <module>fm-aigc</module>
+        <!-- M11-2 计划模块：训练计划编排（P0），饮食计划在 P1 追加 -->
+        <module>fm-plan</module>
         <module>fm-gateway</module>
         <module>fm-user</module>
     </modules>

@@ -14,7 +14,7 @@
  * 用法：node scripts/accept-m3-1.mjs
  *
  * 本脚本最关键的三项：
- *   1) 停播 5 秒后三方对比：Redis 缓存已清 + ZSet 任务已空 + DB moment=最新值
+ *   1) 停播 20 秒后三方对比：Redis 缓存已清 + ZSet 任务已空 + DB moment=最新值
  *      ——分布式合并链路任何一环坏了都能抓到
  *   2) 过半判定 → learned_sections 原子累加 → 课程状态流转全链路
  *   3) XXL-JOB 通过 admin API 真实触发过期任务（不是只看执行器在线）
@@ -184,7 +184,7 @@ function redis(...args) {
   const pass = (env.match(/^REDIS_PASSWORD=(.*)$/m) || [])[1]?.trim();
   const r = spawnSync('docker',
     ['exec', 'fm-redis', 'redis-cli', '-a', pass, '--no-auth-warning', ...args],
-    { encoding: 'utf8' });
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   checkCmdResult('Redis', args.join(' '), r);
   return (r.stdout || '').trim();
 }
@@ -198,7 +198,7 @@ function exchangePublishCount() {
   const r = spawnSync('curl', [
     '-s', '-u', `${user}:${pass}`, '--max-time', '8',
     'http://localhost:15672/api/exchanges/%2F/learning.topic',
-  ], { encoding: 'utf8' });
+  ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   try {
     return JSON.parse(r.stdout)?.message_stats?.publish_in ?? 0;
   } catch {
@@ -406,14 +406,17 @@ async function main() {
   });
   check('再次上报（80/180 未过半）成功', r2.json?.code === 200);
   // ★ r2 走的是「缓存 + ZSet 任务」路径（代码里此路径不直接写库），
-  //   所以此刻：缓存=90（待合并的新值）、DB=60（旧值）、ZSet 有任务。
-  //   ⚠️ ZSCORE 检查必须在 5 秒内完成（docker exec 约 0.3s，足够快）
+  //   所以此刻：缓存=80（待合并的新值）、DB=60（旧值）、ZSet 有任务。
+  //   ⚠️ ZSCORE 检查必须在 `delay-seconds`（20s）内完成（docker exec 约 0.3s，足够快）
   const cacheNow = redis('GET', cacheKey);
   check('★ 待合并的新值先写进缓存（moment=80）', cacheNow.includes('"moment":80'), `cache=${cacheNow.slice(0, 60)}`);
   check('★ ZSet 延迟任务真实存在', redis('ZSCORE', 'learning:record:delay', `${lessonId}:${s1}`) !== '');
 
-  // 停播 5 秒 + 消费轮询 1 秒 → 三方对比
-  await sleep(7000);
+  // ★★ 停播 + 等「delay-seconds(20s) + 消费轮询(1s) + 余量(1s)」→ 三方对比。
+  //   ⚠️ 这个等待时长**跟着 `learning.record.delay-seconds` 走**：
+  //   该值从 5 改成 20（#A24，合并前提是 delay > 上报间隔 15s）后，这里必须同步放大，
+  //   否则等不到任务到期，下面三条断言会全挂。
+  await sleep(22000);
   const mergedAfter = sql(`SELECT moment FROM fm_learning.learning_record WHERE lesson_id=${lessonId} AND section_id=${s1}`);
   check('★ 停播后 DB 已更新为最新 moment', mergedAfter === '80', `moment=${mergedAfter}`);
   check('★ 停播后 Redis 缓存已清理', redis('EXISTS', cacheKey) === '0');

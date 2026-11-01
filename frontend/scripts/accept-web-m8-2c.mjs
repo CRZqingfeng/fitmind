@@ -37,6 +37,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { launchBrowser } from './_cdp-browser.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SHOT_DIR = join(HERE, '..', '..', 'docs', 'screenshots')
@@ -101,7 +102,7 @@ function sql(query) {
   const r = spawnSync(
     MYSQL,
     ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   )
   if (r.status !== 0) throw new Error(`SQL 失败：${query}\n${(r.stderr || '').trim()}`)
   return (r.stdout || '').trim()
@@ -131,16 +132,8 @@ async function requireReachable(url, name) {
   }
 }
 
-async function launchBrowser() {
-  try {
-    return await chromium.launch()
-  } catch (err) {
-    const message = String(err?.message ?? '')
-    if (!/Executable doesn't exist/i.test(message)) throw err
-    console.log('  ⚠️ 未找到 Playwright 自带 Chromium，回退使用系统 Edge（channel=msedge）')
-    return await chromium.launch({ channel: 'msedge' })
-  }
-}
+// ★ 浏览器连接统一见 ./_cdp-browser.mjs —— 本机必须走 CDP，
+//   `chromium.launch({ channel: 'msedge' })` 在这里一定失败（见模块头部说明）。
 
 /**
  * 收集浏览器侧错误 + 网络侧记账（沿用 m8-2a / m7-1 的做法）

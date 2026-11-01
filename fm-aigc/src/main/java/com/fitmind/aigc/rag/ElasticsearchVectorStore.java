@@ -228,6 +228,7 @@ public class ElasticsearchVectorStore implements VectorStore {
             BulkRequest bulk = new BulkRequest();
             int ok = 0;
             for (Document doc : documents) {
+                // 向量化核心
                 float[] vector = embeddingModel.embed(doc);
                 Map<String, Object> source = new HashMap<>();
                 source.put(FIELD_CONTENT, doc.getText());

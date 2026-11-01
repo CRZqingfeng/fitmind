@@ -70,7 +70,7 @@ function cleanup() {
   const sids = (spawnSync(MYSQL,
     ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e',
       `SELECT session_id FROM fm_aigc.chat_session WHERE user_id=${STUDENT_USER_ID}`],
-    { encoding: 'utf8' }).stdout || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).stdout || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
   // ★ 批量 DEL：评估一次会产生上百个会话（每个会话 2~3 个 key），
   //   逐个 docker exec 要几分钟纯等待 —— 批量化之后只要几次调用。
   const memKeys = sids.flatMap((sid) => [
@@ -80,7 +80,7 @@ function cleanup() {
     spawnSync('docker',
       ['exec', 'fm-redis', 'redis-cli', '-a', REDIS_PASSWORD, '--no-auth-warning',
         'DEL', ...memKeys.slice(i, i + 100)],
-      { encoding: 'utf8' });
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   }
   for (const q of [
     `DELETE FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID}`,
@@ -88,7 +88,7 @@ function cleanup() {
   ]) {
     spawnSync(MYSQL,
       ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', q],
-      { encoding: 'utf8' });
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   }
 }
 

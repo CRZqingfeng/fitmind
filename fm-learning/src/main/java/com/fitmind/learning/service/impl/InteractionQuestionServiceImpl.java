@@ -1,7 +1,9 @@
 package com.fitmind.learning.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.OrderItem;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fitmind.api.client.course.CourseClient;
@@ -59,11 +61,19 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
 
     private final CourseClient courseClient;
 
+    /**
+     * 自动标题取描述的前多少字。
+     *
+     * <p>20 是有余量的选择：`interaction_question.title` 是 {@code VARCHAR(60)}，
+     * 就算以后调到 30 也不会撞上限。</p>
+     */
+    private static final int AUTO_TITLE_MAX = 20;
+
     @Override
     public void saveQuestion(QuestionFormDTO dto) {
         Long userId = UserContext.getUser();
         InteractionQuestion question = new InteractionQuestion()
-                .setTitle(dto.getTitle())
+                .setTitle(resolveTitle(dto))
                 .setDescription(dto.getDescription())
                 .setCourseId(dto.getCourseId())
                 .setChapterId(dto.getChapterId())
@@ -77,19 +87,64 @@ public class InteractionQuestionServiceImpl extends ServiceImpl<InteractionQuest
         save(question);
     }
 
+    /**
+     * 标题可以不用填 —— 没填就用「问题描述」的前 20 字兜一个。
+     *
+     * <p><b>为什么放在服务端而不是让前端拼</b>（M10-1 第 2 期）：</p>
+     * <ol>
+     *   <li>接口契约说"必填"、实现却允许不填，本身就是**契约与实现不一致** ——
+     *       这种不一致迟早变成"某个入口忘了拼、用户看到空标题"；</li>
+     *   <li>播放页评论区、社区页、将来可能的小程序……<b>每个入口都要自己拼一遍</b>，
+     *       改一次规则就要改 N 处。</li>
+     * </ol>
+     *
+     * <p>★ 用 {@link StrUtil#sub} 而不是 {@code substring}：后者按 UTF-16 码元截，
+     * 遇到 emoji / 生僻字会把代理对**从中间劈开**，得到一个乱码尾巴。
+     * 判断是否要加省略号时也比的是"截出来的长度是否短于原文"，而不是
+     * {@code desc.length()}（同样因为 emoji 的 {@code length()} 不等于字符数）。</p>
+     *
+     * <p>★ 向后兼容：社区页照常传 title，走上面那个分支，行为一字不变。</p>
+     */
+    private static String resolveTitle(QuestionFormDTO dto) {
+        if (StrUtil.isNotBlank(dto.getTitle())) {
+            return dto.getTitle().strip();
+        }
+        String desc = StrUtil.trimToEmpty(dto.getDescription());
+        if (desc.isEmpty()) {
+            // description 本身是 @NotBlank，正常到不了这里；防御一下，别让 title 落成 null
+            return "未填写标题";
+        }
+        String head = StrUtil.sub(desc, 0, AUTO_TITLE_MAX);
+        return head.length() < desc.length() ? head + "…" : head;
+    }
+
     @Override
     public PageDTO<QuestionVO> queryQuestionPage(QuestionPageQuery query) {
-        // 课程和动作至少要有一个限定 —— 否则就是全站问题列表，没有业务意义
-        if (query.getCourseId() == null && query.getSectionId() == null) {
+        // ★★ M10-1 第 3 期：只有**显式**传 `scope=ALL` 才允许"不带上下文"（社区页的答疑广场）。
+        //    不带 scope 时行为一字不变 —— `accept-web-m7-5.mjs:262-273` 有 3 条负向断言钉着这里
+        //    （测试标题写着"假绿过一次的地方"），**直接删校验会让它们集体变红**。
+        if (!query.isAllScope() && query.getCourseId() == null && query.getSectionId() == null) {
             throw new BadRequestException("课程id和训练动作id不能都为空");
         }
+
+        // 广场的排序：默认最新；`hot` 按**回答数**（问题本身没有点赞字段，点赞在回答上）
+        boolean hot = "hot".equalsIgnoreCase(query.getSort());
+        OrderItem[] orders = hot
+                ? new OrderItem[]{OrderItem.desc("answer_times"), OrderItem.desc("create_time")}
+                : new OrderItem[]{OrderItem.desc("create_time")};
+
         Page<InteractionQuestion> page = lambdaQuery()
                 .eq(Boolean.TRUE.equals(query.getOnlyMine()),
                         InteractionQuestion::getUserId, UserContext.getUser())
                 .eq(query.getCourseId() != null, InteractionQuestion::getCourseId, query.getCourseId())
                 .eq(query.getSectionId() != null, InteractionQuestion::getSectionId, query.getSectionId())
+                // ★ 广场「待回答」页签；★ 它同时是将来 AI 机器人的**唯一作业区**（只补空位、不抢活）
+                .eq(Boolean.TRUE.equals(query.getUnanswered()), InteractionQuestion::getAnswerTimes, 0)
                 .eq(InteractionQuestion::getHidden, false)
-                .page(query.toMpPageDefaultSortByCreateTimeDesc());
+                // ★ 用显式 OrderItem 而不是 `toMpPageDefaultSortByCreateTimeDesc()`：
+                //   后者在前端传了 `sortBy` 时会**拿它拼列名**，而显式 OrderItem 会被优先采用、
+                //   把那条路径整个绕开 —— 顺手收掉一个列名拼接面。前端本来也不传 `sortBy`，无行为影响。
+                .page(query.toMpPage(orders));
         List<InteractionQuestion> records = page.getRecords();
         if (records == null || records.isEmpty()) {
             return PageDTO.empty(page);

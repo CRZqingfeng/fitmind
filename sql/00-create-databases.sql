@@ -64,6 +64,13 @@ CREATE DATABASE IF NOT EXISTS `fm_aigc`
 CREATE DATABASE IF NOT EXISTS `fm_message`
   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 
+-- 15. 训练计划 / 饮食计划（fm-plan，M11-2 起）
+-- ⚠️ 与「4. fm_learning」不是一回事：那边是**课程学习计划**（某门课每周练几次），
+--    这边是**训练编排**（周一练胸：深蹲 4 组 × 8 次 + 组休 90 秒）。
+--    两个"计划"同名不同义，建表语句必须分库，否则三个月后没人分得清。
+CREATE DATABASE IF NOT EXISTS `fm_plan`
+  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+
 -- ============================================================
 -- 校验
 -- ============================================================

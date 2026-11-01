@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
-import { CircleCheckFilled, Refresh, Wallet } from '@element-plus/icons-vue'
+import { CircleCheckFilled, Refresh, Wallet, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -20,6 +20,21 @@ import { formatDateTime, formatPrice, formatRemaining } from '@/utils/format'
  * ★ Mock 渠道是**真的走回调**的：点"模拟支付成功"会打 `/ps/mock/pay/{payOrderNo}`，
  *   它内部发起一次带签名的回调 → fm-pay 验签 → 发 MQ → fm-trade 改订单状态。
  *   所以它不是"前端直接把订单改成已支付"，支付链路的每一环都真的跑了一遍。
+ *
+ * ★★ 页面有**三种状态，不是两种**（M6-8 #2）：
+ *   ① 订单存在且待支付 → 收银台
+ *   ② 订单存在且已支付 → 成功页
+ *   ③ **订单查不到 / 加载失败 → 错误空态**
+ *
+ *   ★ 曾经的写法是"不是①就是②"（`canPay` 为 false 就直接 `settled = true`），
+ *   而 `loadOrder()` 的 `catch {}` 会让 `order` 停在 `null` ——
+ *   于是**打开一个不存在的订单号，页面会显示"支付成功 · 免费"**：
+ *   失败被当成了成功，而且金额还被 `?? 0` 兜底成了 0 元。
+ *
+ *   ★ 这不是"少写了一个分支"，而是**把两件不同的事压成了同一个 boolean**：
+ *   "不欠钱了"和"我查不到这笔单"是两回事，后者必须让用户看见。
+ *   所以这里刻意用**独立的 `loadError`**，而不是给 `canPay` 加分支 ——
+ *   独立状态无法被"将来某次改动"顺手折叠掉。
  */
 const route = useRoute()
 const router = useRouter()
@@ -31,13 +46,21 @@ const payUrl = ref<PayUrl | null>(null)
 const loading = ref(true)
 const creating = ref(false)
 const paying = ref(false)
-/** 支付成功（或本来就已支付） */
+/** 支付成功（订单存在且已不是待支付） */
 const settled = ref(false)
+/** ★ 订单查不到 / 加载失败 —— 与 settled **互斥**，绝不允许同时为真 */
+const loadError = ref(false)
 
 const remaining = ref('—')
 let timer: number | undefined
 
-const amount = computed(() => order.value?.realAmount ?? 0)
+/**
+ * ★ 不兜底成 0。
+ *
+ * `formatPrice(undefined)` 会渲染成「—」，而 `formatPrice(0)` 渲染成「免费」——
+ * 在支付页上，**"读不到金额"绝不能被显示成"免费"**。
+ */
+const amount = computed(() => order.value?.realAmount)
 const canPay = computed(() => order.value?.status === OrderStatus.NO_PAY)
 
 onMounted(async () => {
@@ -46,16 +69,20 @@ onMounted(async () => {
     router.replace('/orders')
     return
   }
-  await loadOrder()
+  const loaded = await loadOrder()
   tick()
   timer = window.setInterval(tick, 10000)
   loading.value = false
 
-  // 只有待支付的订单才需要去申请支付单；已支付的（比如用户刷新了页面）直接展示成功
+  // ★ 三态判定：只有"订单确实存在且已支付"才是成功；查不到一律走错误空态
   if (canPay.value) {
+    // 只有待支付的订单才需要去申请支付单
     await createPay()
-  } else {
+  } else if (loaded && order.value) {
+    // 已支付的（比如用户刷新了页面）直接展示成功
     settled.value = true
+  } else {
+    loadError.value = true
   }
 })
 
@@ -67,11 +94,21 @@ function tick() {
   remaining.value = formatRemaining(order.value?.payOutTime)
 }
 
-async function loadOrder() {
+/**
+ * 拉订单。
+ *
+ * ★ 返回「有没有拿到订单」而不是 void：调用方要拿它判断三态。
+ * 以前这里 `catch {}` 之后什么都不说，`order` 停在 null，
+ * 和"订单真的不存在"长得一模一样 —— 这正是 #2 假成功的入口。
+ */
+async function loadOrder(): Promise<boolean> {
   try {
-    order.value = await getOrder(orderId.value)
+    // ★ silent：本页自己用"错误空态"表达"订单不存在"，不需要再来一个全局提示
+    order.value = await getOrder(orderId.value, { silent: true })
+    return order.value != null
   } catch {
-    /* request.ts 已提示 */
+    order.value = null
+    return false
   }
 }
 
@@ -177,10 +214,22 @@ async function pollUntilSettled(): Promise<boolean> {
   return false
 }
 
+/**
+ * 手动刷新订单状态。
+ *
+ * ★ 与 `onMounted` 走同一套三态判定 —— **不能**再写成
+ * "只要不是待支付就 `settled = true`"：订单被删/查不到时那会直接编出一个"支付成功"。
+ */
 async function handleRefresh() {
-  await loadOrder()
+  const loaded = await loadOrder()
   await loadPayOrderStatus()
-  if (!canPay.value) settled.value = true
+  if (!loaded || !order.value) {
+    loadError.value = true
+    settled.value = false
+    return
+  }
+  loadError.value = false
+  settled.value = !canPay.value
 }
 </script>
 
@@ -191,7 +240,21 @@ async function handleRefresh() {
       <span class="order-no">订单号：{{ orderId }}</span>
     </div>
 
-    <el-card v-if="settled" shadow="never" class="block success-block">
+    <!-- ★ 错误空态（M6-8 #2）：订单查不到时**绝不能**落到"支付成功"那一支 -->
+    <el-card v-if="loadError" shadow="never" class="block error-block" data-testid="pay-error">
+      <el-icon class="error-icon"><WarningFilled /></el-icon>
+      <div class="error-title" data-testid="pay-error-title">订单不存在或已关闭</div>
+      <div class="error-desc">
+        找不到订单号 <span class="error-order-no">{{ orderId }}</span> 的订单。
+        可能是订单号有误、订单已被取消，或者这笔订单不属于当前账号。
+      </div>
+      <div class="error-actions">
+        <el-button type="primary" @click="router.push('/orders')">返回我的订单</el-button>
+        <el-button @click="router.push('/courses')">去选购课程</el-button>
+      </div>
+    </el-card>
+
+    <el-card v-else-if="settled" shadow="never" class="block success-block">
       <el-icon class="success-icon"><CircleCheckFilled /></el-icon>
       <div class="success-title" data-testid="pay-success">支付成功</div>
       <div class="success-desc">
@@ -204,7 +267,14 @@ async function handleRefresh() {
       </div>
     </el-card>
 
-    <el-card v-else shadow="never" class="block">
+    <!--
+      ★ 收银台要等**订单确实拿到了**才渲染（`!loading`）。
+        否则在"接口还没回来"的那一小段时间里，三态都是 false → 会落到这个 v-else，
+        于是**用户会先看到一眼收银台（金额显示"—"），再跳成错误空态**。
+        金额没有兜底成 0 只是让它不那么误导，但闪烁本身就该消掉 ——
+        **"还没确认订单存在"和"订单存在且待支付"必须长得不一样。**
+    -->
+    <el-card v-else-if="!loading" shadow="never" class="block">
       <div class="amount-box">
         <div class="amount-label">应付金额</div>
         <div class="amount-value" data-testid="pay-amount">{{ formatPrice(amount) }}</div>
@@ -401,6 +471,43 @@ async function handleRefresh() {
   font-size: 12px;
   text-align: center;
   color: var(--el-color-primary);
+}
+
+/* M6-8 #2：订单查不到时的错误空态 —— 用 warning 色，与"支付成功"的绿色明确区分 */
+.error-block {
+  text-align: center;
+  padding: 24px 0;
+}
+
+.error-icon {
+  font-size: 56px;
+  color: var(--el-color-warning);
+}
+
+.error-title {
+  margin-top: 12px;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.error-desc {
+  margin: 8px auto 0;
+  max-width: 460px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+}
+
+.error-order-no {
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.error-actions {
+  margin-top: 20px;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
 }
 
 .success-block {

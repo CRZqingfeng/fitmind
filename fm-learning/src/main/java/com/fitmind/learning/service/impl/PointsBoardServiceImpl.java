@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fitmind.api.client.user.UserClient;
 import com.fitmind.api.dto.user.UserDTO;
+import com.fitmind.common.domain.query.PageQuery;
 import com.fitmind.common.utils.UserContext;
 import com.fitmind.learning.constants.LearningConstants;
 import com.fitmind.learning.constants.RedisConstants;
@@ -13,6 +14,7 @@ import com.fitmind.learning.domain.query.PointsBoardQuery;
 import com.fitmind.learning.domain.vo.PointsBoardItemVO;
 import com.fitmind.learning.domain.vo.PointsBoardVO;
 import com.fitmind.learning.mapper.PointsBoardMapper;
+import com.fitmind.learning.mapper.PointsRecordMapper;
 import com.fitmind.learning.service.IPointsBoardSeasonService;
 import com.fitmind.learning.service.IPointsBoardService;
 import com.fitmind.learning.utils.TableInfoContext;
@@ -23,6 +25,7 @@ import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -48,6 +51,7 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
     private final StringRedisTemplate redisTemplate;
     private final IPointsBoardSeasonService seasonService;
     private final UserClient userClient;
+    private final PointsRecordMapper pointsRecordMapper;
 
     @Override
     public PointsBoardVO queryBoard(PointsBoardQuery query) {
@@ -62,7 +66,13 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
             rows = listFromRedis(key, query.getPageNo(), query.getPageSize());
         } else {
             rows = queryHistory(query);
-            fillMyBoardFromDb(season, vo);
+            if (rows.isEmpty()) {
+                // ★ 分表不存在（该赛季没跑过月度结算）→ 用积分明细按月实时重算（#C42）。
+                //   顺序很重要：只有分表**确实没数据**时才兜底，已结算的赛季仍以快照为准。
+                rows = queryHistoryFromLedger(query, vo);
+            } else {
+                fillMyBoardFromDb(season, vo);
+            }
         }
         if (rows.isEmpty()) {
             vo.setBoardList(List.of());
@@ -98,7 +108,7 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
     public int saveToDb(Integer season, int shardIndex, int shardTotal) {
         LocalDate month = seasonBeginDate(season);
         String key = boardKey(month);
-        TableInfoContext.setInfo(LearningConstants.POINTS_BOARD_TABLE_PREFIX + season);
+        TableInfoContext.setInfo(LearningConstants.POINTS_BOARD_TABLE_PREFIX + season);//动态表名
         int total = 0;
         try {
             // ★ 分片分页：第 index 个分片从第 index+1 页开始，步长是分片总数
@@ -192,7 +202,13 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
         }
     }
 
-    /** 历史赛季榜单页（查分表，动态表名生效） */
+    /**
+     * 历史赛季榜单页（查分表 {@code points_board_{season}}，动态表名生效）。
+     *
+     * <p>⚠️ 查不到时返回空列表，但这有两种<b>完全不同</b>的原因：
+     * ① 分表不存在（该赛季没跑过月度结算）；② 该赛季确实没人得分。
+     * 所以这里失败时只回空、<b>不返回"已结算"的信号</b>，由 {@link #queryBoard} 接着走流水兜底。</p>
+     */
     private List<PointsBoard> queryHistory(PointsBoardQuery query) {
         TableInfoContext.setInfo(LearningConstants.POINTS_BOARD_TABLE_PREFIX + query.getSeason());
         try {
@@ -202,11 +218,89 @@ public class PointsBoardServiceImpl extends ServiceImpl<PointsBoardMapper, Point
             }
             return page.getRecords();
         } catch (Exception e) {
-            log.warn("查询历史赛季榜失败（赛季 {}）：{}", query.getSeason(), e.getMessage());
+            // ★ 以前这里只 warn 一句"查询失败"，页面上的表现与"真的没人得分"完全一样 →
+            //   排查方向被抹平（#C42）。现在把**下一步该干什么**也写进日志里。
+            log.warn("历史赛季分表不可用（赛季 {}，多为该赛季未结算 —— 需补跑 createTableJob / savePointsBoard2DB）：{}",
+                    query.getSeason(), e.getMessage());
             return List.of();
         } finally {
             TableInfoContext.remove();
         }
+    }
+
+    /**
+     * 历史赛季的<b>跨月兜底</b>：分表不存在时，直接用积分明细（{@code points_record}）实时重算。
+     *
+     * <p><b>为什么需要它</b>：历史赛季的数据源是"月度结算快照"，而结算靠 XXL-JOB
+     * （每月 1 日建表 + 落库）。这几个任务的 cron 全在<b>凌晨</b>，开发机那时通常不在线 ——
+     * 实测 {@code xxl_job_log} 里 46/47 两条记录都没有、{@code ensureSeasonJob} 唯一一次触发
+     * 也是「调度失败：执行器地址为空」。任务没跑成 → 分表不存在 → 历史赛季永久空白。
+     * 把"历史"完全建立在一条<b>依赖任务执行过</b>的路径上，太脆。</p>
+     *
+     * <p><b>为什么以 points_record 为准、而不是 Redis 实时榜</b>（#C42 实测）：
+     * 9 月的 ZSet 是 121 分、积分明细是 130 分，差 9 分。ZSet 是<b>派生数据</b>
+     * （90 天 TTL、月初会被 {@code clearRedis} 删掉、Redis 重启可能丢），
+     * {@code points_record} 才是"记录过什么"的流水：能重算任意月份，
+     * 且与「今日积分明细」同源，口径不会自相矛盾。</p>
+     *
+     * <p>★ <b>这里刻意不做"合并实时榜"</b>：曾经为了让"明细被验收脚本删掉的人"也出现在榜上，
+     * 这里会把 ZSet 里独有的人补进来 —— 后来去掉了。因为那是<b>治脏数据的下策</b>：
+     * 脏数据（#C43）应该<b>直接把分表补对</b>，而不是让<b>每一次历史查询</b>都去兼容它。
+     * 查询口径的特例越少越好。</p>
+     *
+     * @return 该页的榜单行（已带 rank）；顺带把"我的积分/排名"写进 vo
+     */
+    private List<PointsBoard> queryHistoryFromLedger(PointsBoardQuery query, PointsBoardVO vo) {
+        if (query.getSeason() == null) {
+            return List.of();
+        }
+        PointsBoardSeason season = seasonService.getById(query.getSeason().intValue());
+        if (season == null || season.getBeginTime() == null || season.getEndTime() == null) {
+            log.warn("历史赛季兜底跳过：赛季不存在，season={}", query.getSeason());
+            return List.of();
+        }
+        LocalDateTime begin = season.getBeginTime().atStartOfDay();
+        // 结束日当天 23:59:59 也算赛季内 → 上界取「结束日 + 1 天」的 0 点（左闭右开）
+        LocalDateTime end = season.getEndTime().plusDays(1).atStartOfDay();
+
+        List<PointsBoard> all = pointsRecordMapper.sumPointsGroupByUser(begin, end);
+        // SQL 已按「分数倒序 + user_id 兜底」排好，名次按顺序赋即可
+        for (int i = 0; i < all.size(); i++) {
+            all.get(i).setRank(i + 1);
+        }
+        log.info("历史赛季分表不可用，已用积分明细兜底重算：season={}, 区间=[{}, {}), 上榜人数={}",
+                query.getSeason(), begin, end, all.size());
+
+        // 我的积分/排名：与列表同一份数据，不会自相矛盾
+        Long myId = UserContext.getUser();
+        if (myId != null) {
+            all.stream()
+                    .filter(r -> myId.equals(r.getUserId()))
+                    .findFirst()
+                    .ifPresent(mine -> {
+                        vo.setPoints(mine.getPoints());
+                        vo.setRank(mine.getRank());
+                    });
+        }
+        return pageInMemory(all, query);
+    }
+
+    /**
+     * 内存分页。
+     *
+     * <p>兜底路径的结果集是"一个月的活跃用户数"，量级很小（本项目演示数据只有个位数），
+     * 所以直接把整月聚合结果拿来切页，比再写一条带窗口函数的 SQL 划算得多。
+     * ★ 如果将来要支撑大流量，这里应换成带 {@code ROW_NUMBER() OVER (ORDER BY SUM(points) DESC)}
+     * 的数据库分页 —— 现在是<b>已知的规模假设</b>，不是疏漏。</p>
+     */
+    private List<PointsBoard> pageInMemory(List<PointsBoard> all, PointsBoardQuery query) {
+        int pageNo = query.getPageNo() == null ? PageQuery.DEFAULT_PAGE_NUM : query.getPageNo();
+        int pageSize = query.getPageSize() == null ? PageQuery.DEFAULT_PAGE_SIZE : query.getPageSize();
+        int from = Math.max(0, (pageNo - 1) * pageSize);
+        if (from >= all.size()) {
+            return List.of();
+        }
+        return all.subList(from, Math.min(all.size(), from + pageSize));
     }
 
     private String boardKey(LocalDate date) {

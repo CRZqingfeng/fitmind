@@ -119,7 +119,9 @@ public class NoteServiceImpl extends ServiceImpl<NoteMapper, Note> implements IN
     public PageDTO<NoteVO> queryNotePage(NotePageQuery query) {
         Long courseId = query.getCourseId();
         Long sectionId = query.getSectionId();
-        if (courseId == null && sectionId == null) {
+        // ★ M10-1 第 3 期：显式 `scope=ALL` 才允许不带上下文（社区页广场）。
+        //   不带 scope 时行为一字不变 —— `accept-web-m7-5.mjs` 的负向断言钉着这里。
+        if (!query.isAllScope() && courseId == null && sectionId == null) {
             throw new BadRequestException("课程id和训练动作id不能都为空");
         }
         Long userId = UserContext.getUser();

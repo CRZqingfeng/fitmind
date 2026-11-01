@@ -57,6 +57,24 @@ public final class AigcConstants {
     /** prompt 快照保留条数 */
     public static final int MOCK_PROMPT_SNAPSHOT_LIMIT = 30;
 
+    /**
+     * ★★ <b>工具定义快照</b>（M6-8 第 2 期新增）—— 把这一轮**发给模型的工具名 + 工具描述**
+     * 原样写进 Redis，供验收脚本读取。
+     *
+     * <p><b>为什么需要它</b>：{@code #12} 的修复本质是"发给模型的<b>工具描述</b>放宽了"
+     * （从"id 必须来自搜索" → "id 必须经 queryCourseDetail 核实"）。
+     * 而这件事<b>只有真实模型才表现得出来</b>，真实模型又是非确定的 ——
+     * "它这次恰好照着新约束做了"不能当作"约束已经改对了"的证据。</p>
+     *
+     * <p>工具描述是<b>确定性的文本</b>：它要么在 prompt 里，要么不在。所以把它快照下来，
+     * 验收就能断言"<b>约束确实变了</b>"—— 这比断言"模型这次听话了"稳固得多。
+     * （模型的行为可以变，发给它的规则不会。）</p>
+     *
+     * <p>★ 与 {@link #MOCK_PROMPT_SNAPSHOT_KEY} 同样存 Redis、同样属于<b>测试旁路</b>，
+     * 不占任何业务接口。</p>
+     */
+    public static final String MOCK_TOOLS_SNAPSHOT_KEY = "aigc:mock:tools";
+
     // ==================== 会话记忆与打断（M6-5） ====================
 
     /** 摘要消息的角色标记（写在记忆消息里的 role 值，不是 SSE 角色） */
@@ -202,10 +220,11 @@ public final class AigcConstants {
     /** 超过每日轮数 */
     public static final String LIMIT_CHAT_MSG =
             "今天的 AI 教练使用次数已经用完了（每天 %d 次）。明天再来找我吧，"
-                    + "也可以先翻翻前面的对话记录。";
+                    + "也可以先翻翻前面的对话记录。（这条提醒不会被保存到对话记录里）";
     /** 超过每日 token 额度 */
     public static final String LIMIT_TOKEN_MSG =
-            "今天的 AI 对话额度已经用完了（这个额度是按 token 计的）。明天再来找我吧。";
+            "今天的 AI 对话额度已经用完了（这个额度是按 token 计的）。明天再来找我吧。"
+                    + "（这条提醒不会被保存到对话记录里）";
     /** 并发超限（上一条还在生成） */
     public static final String LIMIT_CONCURRENCY_MSG =
             "我还在回答你上一条问题，等我说完再问下一个好吗？";
@@ -216,6 +235,15 @@ public final class AigcConstants {
      * <p>★ 三种原因必须给三种不同的提示：它们对用户的含义完全不一样 ——
      * "今天用完了"是无可挽回（等明天），"上一条还在答"是<b>等一下就好</b>。
      * 把后者也说成"额度用完了"会让用户直接放弃，而其实 3 秒后就能继续。</p>
+     *
+     * <p>★★ M6-8 #18：前两种（额度真的用完）**额外说明"这条提醒不会被保存"**。
+     * 被限流的请求是**不建会话、不落库**的（既定设计，见
+     * {@code ChatServiceImpl#stream} 里"限流放在 prepare 之前"那段注释）——
+     * 于是界面上有这条提示、数据库里却查无此事，用户会以为"我问过、它也答了"，
+     * 刷新后却发现记录里没有。与其让用户自己困惑，不如把这件事**写在提示里**。</p>
+     *
+     * <p>并发超限（{@link #LIMIT_CONCURRENCY_MSG}）**不加**这句：它的语义是
+     * "等一下再问"，用户重发即可，本来就不存在"我这次问的话去哪了"的疑问。</p>
      */
     public static String limitMessage(String reason, int limit) {
         if ("CHAT_LIMIT".equals(reason)) {

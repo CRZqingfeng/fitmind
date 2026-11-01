@@ -99,7 +99,7 @@ async function login(phone, { staff = false } = {}) {
 function sql(query) {
   const r = spawnSync(MYSQL,
     ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query],
-    { encoding: 'utf8' });
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   return (r.stdout || '').trim();
 }
 

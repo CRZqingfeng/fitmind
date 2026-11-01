@@ -12,7 +12,7 @@ import org.springframework.cloud.openfeign.EnableFeignClients;
  *
  * <p>两个有技术含量的点：</p>
  * <ol>
- *   <li><b>分布式进度合并</b>：播放中每 15 秒一次的上报，经 Redis ZSet 延迟队列合并成
+ *   <li><b>分布式进度合并</b>：播放过程中的高频上报，经 Redis ZSet 延迟队列合并成
  *       停播后的一次落库（多实例安全，替代常见实现的单机 DelayQueue）</li>
  *   <li><b>XXL-JOB 执行器</b>：课表过期扫描走分布式调度而不是 @Scheduled</li>
  * </ol>

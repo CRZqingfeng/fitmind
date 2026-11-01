@@ -4,6 +4,7 @@ import { computed, onMounted } from 'vue'
 import {
   ArrowDown,
   Bell,
+  Calendar,
   ChatDotRound,
   HomeFilled,
   MagicStick,
@@ -45,6 +46,10 @@ const menus = [
   { path: '/', label: '首页', icon: HomeFilled },
   { path: '/courses', label: '课程', icon: Notebook },
   { path: '/my-courses', label: '我的课程', icon: Reading },
+  // M11-2 计划模块：★ 只加这一项。参考 App 底部有"训练/饮食/我的计划"多个 tab，
+  // 但菜单是**页面浏览路径**，不是功能清单 —— 内部用 el-tabs 分流就够，
+  // 拆成 4 项会把这条横条挤成谁也不看的标签墙（M7-4 已经从菜单里挪走过购物车）。
+  { path: '/plan', label: '计划', icon: Calendar },
   { path: '/community', label: '社区', icon: ChatDotRound },
   { path: '/growth', label: '成长', icon: Medal },
   { path: '/assessment', label: '体测', icon: Odometer },
@@ -168,7 +173,13 @@ async function handleCommand(command: string) {
             <el-dropdown-menu>
               <el-dropdown-item command="me">个人中心</el-dropdown-item>
               <el-dropdown-item command="orders">我的订单</el-dropdown-item>
-              <el-dropdown-item command="plans">训练计划</el-dropdown-item>
+              <!--
+                ⚠️ 这一项指向 `/plans`（**课程学习计划**：某门课每周练几次），
+                与菜单里的「计划」(`/plan`，训练编排) 是两件事。
+                文案改成「课程计划」是为了不让两个同义入口打架 —— 只改文案，不动跳转，
+                `DROPDOWN_ROUTES.plans` 仍然指向 /plans，PlansView.vue 一行没动。
+              -->
+              <el-dropdown-item command="plans">课程计划</el-dropdown-item>
               <el-dropdown-item command="refunds">我的退款</el-dropdown-item>
               <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
             </el-dropdown-menu>
@@ -224,6 +235,18 @@ async function handleCommand(command: string) {
 .app-nav {
   flex: 1;
   border-bottom: none;
+  min-width: 0;
+}
+
+/*
+ * ★ 横向菜单的第 10 项（M11-2「计划」）会把顶栏顶出横向滚动条（实测 1440 宽下溢出 58px）。
+ *   el-menu 这里配了 :ellipsis="false"（不做"..."折叠），所以只能靠压缩单项内边距吸收。
+ *   不用媒体查询直接改全局 padding，是因为宽屏（≥1500）本来放得下，没必要一起挤。
+ */
+@media (max-width: 1500px) {
+  .app-nav :deep(.el-menu-item) {
+    padding: 0 10px;
+  }
 }
 
 /* 购物车图标 + 角标（顶栏右侧） */

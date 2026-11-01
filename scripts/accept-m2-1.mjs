@@ -54,6 +54,15 @@ function rawUrlOf(key) {
     : `${STORAGE.publicEndpoint}/${STORAGE.bucket}/${key}`;
 }
 
+/** 取 URL 的 host（解析失败就原样返回），用于报错时能说清"打到哪" */
+function safeHost(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return String(url);
+  }
+}
+
 /** 从 key 所在前缀判断它是否"允许匿名读"（与两份白名单脚本保持一致） */
 const PUBLIC_PREFIXES = ['avatar', 'course-cover', 'action-cover', 'media-cover', 'common'];
 
@@ -291,6 +300,21 @@ async function main() {
   check('返回预创建的媒资 id', !!mediaId, `mediaId=${mediaId}`);
   check('返回预签名上传地址', !!uploadUrl && uploadUrl.includes(STORAGE.signatureParam),
     `url=${String(uploadUrl).slice(0, 70)}`);
+
+  /**
+   * ★★ 这一条是 2026-10-04 补的，起因是一次**只在 IDEA 启动路径下才出现**的故障：
+   *    IDEA 不经过 scripts/start-all.sh，没人注入桶名 → `fm.storage.bucket` 兜底成
+   *    MinIO 的 `fitmind` → 后端签出 `https://fitmind.oss-cn-beijing.aliyuncs.com/...`
+   *    （OSS 上不存在这个桶）→ 浏览器直传的 OPTIONS 预检 **404 NoSuchBucket**，
+   *    而前端只报一句"网络中断"，排查方向被带偏很久。
+   *
+   * 当时这个脚本**抓不到**它：后面的直传用的是 rawUrlOf() 自拼的地址（桶名写在本脚本里），
+   * 完全绕开了"后端返回的 host"。所以这里补上"后端 host == 期望 host"的断言 ——
+   * 配置静默回退这类问题，必须用"拿后端产物去比对期望值"的方式才抓得住。
+   */
+  check('★★ 签名地址的 host 与配置一致（防"桶名静默回退"）',
+    safeHost(uploadUrl) === safeHost(STORAGE.publicEndpoint),
+    `实际=${safeHost(uploadUrl)} 期望=${safeHost(STORAGE.publicEndpoint)}`);
 
   // 关键：真的用这个 URL 把文件 PUT 上去
   /**

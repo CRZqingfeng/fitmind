@@ -53,6 +53,26 @@ const leadingBlanks = computed(() => Array.from({ length: firstWeekday.value }, 
 const monthDays = computed(() => Array.from({ length: daysInMonth.value }, (_, i) => i + 1))
 const monthLabel = computed(() => `${today.getFullYear()} 年 ${today.getMonth() + 1} 月`)
 
+/**
+ * 「当前赛季」的展示名。
+ *
+ * ★ 为什么要带上月份（#C41）：下拉里原来只有这一项不带月份，而历史赛季是
+ *   「2026年09月赛季」这种格式 —— 于是 10 月时会同时看到
+ *   「当前赛季（实时）」和「2026年10月赛季」，**看起来像两个不同的赛季**，
+ *   其实是同一个月的两个入口（一个是 Redis 实时榜，一个是月度结算快照）。
+ *   带上月份后这层关系一眼可见。
+ * ★ 而且后端已过滤掉"进行中"的赛季，所以不带「（实时）」的那一项
+ *   **只会在当月结束之后才出现在列表里**。
+ */
+const currentSeasonLabel = computed(
+  () => `${today.getFullYear()}年${String(today.getMonth() + 1).padStart(2, '0')}月赛季（实时）`,
+)
+
+/** 空榜文案：★ 区分「当前赛季」与「历史赛季」，别让两种情况长得一样（#C42 的教训） */
+const boardEmptyText = computed(() =>
+  activeSeason.value === 0 ? '本赛季还没有人得积分' : '该赛季没有积分记录',
+)
+
 onMounted(load)
 
 async function load() {
@@ -244,7 +264,8 @@ function unlimited(item: PointsStatistics): boolean {
               style="width: 160px"
               @change="handleSeasonChange"
             >
-              <el-option :value="0" label="当前赛季（实时）" />
+              <!-- ★ 带上月份：否则 10 月时「当前赛季（实时）」和「2026年10月赛季」看起来像两个赛季（#C41） -->
+              <el-option :value="0" :label="currentSeasonLabel" />
               <el-option
                 v-for="s in seasons"
                 :key="s.id"
@@ -282,7 +303,7 @@ function unlimited(item: PointsStatistics): boolean {
 
         <el-empty
           v-if="!(board?.boardList ?? []).length"
-          description="榜单还没有数据"
+          :description="boardEmptyText"
           :image-size="60"
           data-testid="growth-board-empty"
         />

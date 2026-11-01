@@ -18,10 +18,16 @@
  *      这条断言的价值在于：它同时覆盖了"上报成功"和"页面读的是服务端数据"——
  *      如果前端在本地维护一份进度（很多项目会这么偷懒），调价/换设备后就会对不上。
  *
- *   2. **★ "上报即完成" 这个后端行为被前端正确对待了**。
- *      后端只要收到上报就置 `finished = true`（不判断看了多少）。
- *      所以脚本点的是「标记完成」（明确动作），并断言接口的已完成数真的 +1；
- *      同时验证页面**没有**在播放时偷上报（否则点开视频就会"练完"）。
+ *   2. **★ "过半即完成" 这个后端规则被前端正确对待了**。
+ *      后端判据是 `moment × 2 >= duration`（**播放过半即完成**，
+ *      阈值收在 `LearningConstants.FINISH_RATIO_DENOMINATOR`）。
+ *      所以脚本点的是「标记完成」（用 `moment = duration` 明确表达"练完了"），
+ *      并断言接口的已完成数真的 +1。
+ *      ★ 订正（2026-10-04）：本行原先写的是"后端只要收到上报就置 `finished = true`
+ *        （**不判断看了多少**）"—— 那是**误读**：当时用的用例是 `60 / 120`，
+ *        而它正好压在半数阈值上（`60 × 2 = 120 >= 120`），换个点就露馅：
+ *        `moment = 59 → 118 < 120 → finished = false`。
+ *        ⚠️ 这条误读曾让播放页一度放弃"播放中每 15 秒上报"（详见 `LearnView.vue` 顶部注释）。
  *
  *   3. **积分/签到/榜单的页面值与接口值一致**（会变的数据更要逐字比对）。
  *
@@ -35,6 +41,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { chromium } from 'playwright'
+import { launchBrowser } from './_cdp-browser.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SHOT_DIR = join(HERE, '..', '..', 'docs', 'screenshots')
@@ -63,15 +70,8 @@ function section(title) {
   console.log(`\n【${title}】`)
 }
 
-async function launchBrowser() {
-  try {
-    return await chromium.launch()
-  } catch (err) {
-    if (!/Executable doesn't exist/i.test(String(err?.message ?? ''))) throw err
-    console.log('  ⚠️ 未找到 Playwright 自带 Chromium，回退使用系统 Edge（channel=msedge）')
-    return await chromium.launch({ channel: 'msedge' })
-  }
-}
+// ★ 浏览器连接统一见 ./_cdp-browser.mjs —— 本机必须走 CDP，
+//   `chromium.launch({ channel: 'msedge' })` 在这里一定失败（见模块头部说明）。
 
 async function requireReachable(url, name) {
   try {

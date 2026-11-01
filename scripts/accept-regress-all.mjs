@@ -138,6 +138,8 @@ function runOne(name) {
     cwd: ROOT,
     shell: true, // Windows 下需要走 shell
     encoding: 'utf8',
+    // ★ 沙箱里 stdin 不能是 pipe（否则 spawnSync 直接 EBUSY）——本项目所有调用都不需要 stdin
+    stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: 64 * 1024 * 1024,
     env: {
       ...process.env,

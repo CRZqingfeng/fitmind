@@ -50,6 +50,12 @@ fm:
       - /ds/**
       - /sms/**
       - /ais/**
+      # M11-2 计划模块（训练计划 / 饮食计划，P1 追加饮食）
+      # ★ 只加路由不加这一行会静默出错：网关对**不在 requireLoginPath 里**的路径
+      #   照样解析 token 并透传用户信息，所以"带着 token 访问一切正常"；
+      #   但匿名请求不会被 401 拦下，会直接打到 fm-plan，UserContext.getUser() = null，
+      #   于是查询变成"谁也查不到"，写入可能落 user_id=null 的脏数据。
+      - /pls/**
 
 ---
 spring:
@@ -125,6 +131,11 @@ spring:
           uri: lb://fm-aigc
           predicates:
             - Path=/ais/**
+        # M11-2 计划模块：端口 8095，库 fm_plan
+        - id: pls
+          uri: lb://fm-plan
+          predicates:
+            - Path=/pls/**
       # 全局过滤器：去掉第一层路径前缀
       default-filters:
         - StripPrefix=1

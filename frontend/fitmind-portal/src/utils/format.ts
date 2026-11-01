@@ -37,6 +37,27 @@ export function formatDuration(seconds: number | null | undefined): string {
 }
 
 /**
+ * 秒 → `mm:ss`（超过一小时是 `h:mm:ss`）—— **时间轴上的位置**，不是时长。
+ *
+ * ★ 与 `formatDuration` 的分工（别互相替换）：
+ *   · `formatDuration` 是**给人读的时长**："5 分 20 秒"，适合"这个动作要练多久"；
+ *   · `formatClock` 是**播放器上的刻度**："03:42"，适合笔记时间戳、进度。
+ *     ★ 它必须紧凑、定宽、**能和 `<video>` 控制条上的数字一眼对上** ——
+ *       "5 分 20 秒"让人没法快速核对，而"05:20"可以。
+ *
+ * ★ 补零是刻意的：`3:42` 和 `03:42` 在列表里宽度不一样，左边缘会参差。
+ *   这条是笔记列表，时间戳要能**竖向扫**（M10-1 §四）。
+ */
+export function formatClock(seconds: number | null | undefined): string {
+  const total = Math.max(0, Math.floor(seconds ?? 0))
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`
+}
+
+/**
  * 分页的 `total` / `pages` → 数字。
  *
  * ★ 为什么需要一个专门的函数（而不能在页面里写 `Number(page.total)`）：
@@ -196,4 +217,28 @@ export function formatRemaining(target: string | number[] | null | undefined, no
   const m = Math.floor(total / 60)
   const s = total % 60
   return m > 0 ? `${m} 分 ${String(s).padStart(2, '0')} 秒` : `${s} 秒`
+}
+
+/**
+ * 公斤 → 斤（×2）· 斤 → 公斤（÷2）
+ *
+ * ★★ 这是全前端**唯一**的重量换算点（M11-2 硬要求）。
+ *   数据库和接口一律是 **kg**，界面一律显示 **斤**。
+ *   散落各处各乘一次的下场：某处漏乘（显示 60 斤实际 60kg，看着像"练得特别猛"），
+ *   或者某处乘了两次（120 斤变 240 斤）—— 两种都不报错，只是数字不对。
+ *
+ * ★ 为什么不直接用后端 `PlanDayItem.weightJin`：
+ *   执行页的"本组重量"是用户输入的，必须能双向换算；
+ *   为了"输入/展示走同一套逻辑"，计划里的建议重量也统一从这里过，
+ *   避免出现"计划页用后端算的斤、执行页用前端算的斤"两个来源。
+ */
+export function toJin(kg: number | null | undefined): number | null {
+  if (kg === null || kg === undefined) return null
+  return Number((kg * 2).toFixed(1))
+}
+
+/** 斤 → 公斤（提交给后端前必须换回 kg） */
+export function toKg(jin: number | null | undefined): number | null {
+  if (jin === null || jin === undefined) return null
+  return Number((jin / 2).toFixed(2))
 }

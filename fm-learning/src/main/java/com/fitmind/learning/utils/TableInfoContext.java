@@ -7,9 +7,12 @@ package com.fitmind.learning.utils;
  * MyBatis-Plus 的 {@code DynamicTableNameInnerInterceptor} 会把 SQL 里的
  * 逻辑表名 {@code points_board} 替换掉。</p>
  *
- * <p>⚠️ <b>用完必须在 finally 里 remove()</b>：Tomcat 线程池会复用线程，
- * 不清理会让下一次普通查询（比如查 points_record）也被改成榜单分表，
- * 报"表不存在"或查错表。</p>
+ *
+ * <p>⚠️ <b>用完必须在 finally 里 remove()</b>：Tomcat 线程池会复用线程，</p>
+ * <p>**那 MyBatis 怎么知道这次要操作哪张表？**</p>
+ * <p>这就是 `TableInfoContext`（ThreadLocal）存在的意义：
+ * 它是一个**线程随身携带的小纸条**，任务开始时写上 " 这次叫 `points_board_5`"，
+ * SQL 执行前拦截器看到纸条就把表名替换掉，用完在 `finally` 里擦掉。</p>
  */
 public class TableInfoContext {
 

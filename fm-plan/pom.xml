@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.fitmind</groupId>
+        <artifactId>fitmind</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>fm-plan</artifactId>
+    <description>计划服务：训练计划编排（训练日 + 动作项 + 执行打卡），P1 追加饮食计划</description>
+
+    <dependencies>
+        <!-- 内部模块 -->
+        <dependency>
+            <groupId>com.fitmind</groupId>
+            <artifactId>fm-common</artifactId>
+        </dependency>
+        <!-- ★★ 这个依赖**不能省**，哪怕 P0 一次跨服务调用都没有：
+             鉴权 SDK 的 ResourceInterceptorConfiguration 方法签名里用到了 com.fitmind.api.client.user.UserClient，
+             缺了它编译期一切正常，**启动期**才抛
+             NoClassDefFoundError: com/fitmind/api/client/user/UserClient
+             （报错还裹在 "Error processing condition on SpringDocConfiguration…" 里，看着完全不像缺依赖）。
+             2026-10-31 实测踩过一次。 -->
+        <dependency>
+            <groupId>com.fitmind</groupId>
+            <artifactId>fm-api</artifactId>
+        </dependency>
+        <!-- 资源服务鉴权 SDK：把网关透传的用户信息放入 UserContext。
+             ★ 没有它，所有 @RequestMapping 都能被匿名访问，且 UserContext.getUser() 恒为 null -->
+        <dependency>
+            <groupId>com.fitmind</groupId>
+            <artifactId>fm-auth-resource-sdk</artifactId>
+        </dependency>
+
+        <!-- Web -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <!-- 接口文档 -->
+        <dependency>
+            <groupId>com.github.xiaoymin</groupId>
+            <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
+        </dependency>
+
+        <!-- 服务注册发现 -->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+
+        <!-- 声明式服务调用（启动类上 @EnableFeignClients 需要它，P0 暂无跨服务调用） -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-openfeign</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-loadbalancer</artifactId>
+        </dependency>
+
+        <!-- 持久层 -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+        <!-- ★ MP 3.5.9 起分页拦截器在 jsqlparser 模块里，不引这个 PaginationInnerInterceptor 直接 ClassNotFound
+             （M2-1 踩过：接口看着正常，分页查出全表） -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-jsqlparser</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>mysql</groupId>
+            <artifactId>mysql-connector-java</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+    </dependencies>
+
+    <!--
+      ★ 与 fm-learning 的依赖差异（不是抄漏了，是故意不引）：
+        · amqp / redis —— 训练完成后不发积分事件（P1 再考虑接 MQ）
+        · xxl-job      —— 没有定时任务（"超时未完成的训练置放弃"留到 P1）
+      少一个依赖就少一个启动期炸点：fm-learning 那套是为"进度合并 + 过期任务"服务的，这里没有那些场景。
+    -->
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

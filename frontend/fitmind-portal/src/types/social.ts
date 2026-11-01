@@ -24,6 +24,17 @@ export const ReplyUserType = {
   ADMIN: 1,
   STUDENT: 2,
   COACH: 3,
+  /**
+   * ★ AI 机器人（M10-1 第 2 期预留）。
+   *
+   * 后端 `ReplyVO.userType` 本来就是 int（由 fm-user 查出后透传），
+   * 所以**加这个值不需要改后端** —— 将来机器人回复时带 `userType = 4`，
+   * 前端就会把它渲染成「AI 助手」徽章。
+   *
+   * ⚠️ 但它必须**永远只出现在评论区**：学习视频下面挂着动作小测，
+   * 任何"能在题目旁边自由提问"的 AI 入口都等于递答案（见 M10-1 §1.1 的红线）。
+   */
+  BOT: 4,
 } as const
 
 /** 站内信类型 */
@@ -61,7 +72,13 @@ export interface QuestionForm {
   courseId?: string
   chapterId?: string
   sectionId?: string
-  title: string
+  /**
+   * 标题 —— ★ M10-1 第 2 期起**可以不传**（后端会用 `description` 前 20 字兜一个）。
+   *
+   * 播放页的评论区是"边看边问"的形态，让用户先想个标题反人性（B 站的评论也没有标题）。
+   * ⚠️ 但它仍是 60 字上限的字符串：社区页照常传，行为不变。
+   */
+  title?: string
   description?: string
   anonymity?: boolean
 }
@@ -73,6 +90,20 @@ export interface QuestionPageQuery {
   sectionId?: string
   /** 只看我提问的 */
   onlyMine?: boolean
+  /**
+   * 浏览范围（M10-1 第 3 期）。
+   *
+   * ★ **不传** = 按 courseId / sectionId 过滤，且二者**至少传一个**（否则后端 400）；
+   * ★ **传 `'ALL'`** = 全站广场，忽略 course/section。
+   *
+   * ⚠️ 后端用的是"显式开关"而不是"删掉校验"：`accept-web-m7-5.mjs:262-273` 有 3 条负向断言
+   *    （测试标题写着"假绿过一次的地方"）钉着"不带上下文必须 400"。
+   */
+  scope?: 'ALL'
+  /** 只看还没有人回答的（`answer_times = 0`）—— 广场的「待回答」页签 */
+  unanswered?: boolean
+  /** 排序：不传=最新；`hot`=最热（按回答数） */
+  sort?: 'hot'
 }
 
 export interface Reply {
@@ -163,6 +194,12 @@ export interface NotePageQuery {
   sectionId?: string
   /** 只看我的 */
   onlyMine?: boolean
+  /**
+   * 浏览范围（M10-1 第 3 期）：与 `QuestionPageQuery.scope` 同一套语义。
+   * ★ 全站模式下**别人的私有笔记不会出现** —— 这条由 `NoteMapper.xml` 的
+   *   `AND (n.is_private = 0 OR n.user_id = #{userId})` 守住，不靠调用方记得过滤。
+   */
+  scope?: 'ALL'
 }
 
 // ==================== 点赞 ====================

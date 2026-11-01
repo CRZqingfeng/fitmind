@@ -84,7 +84,7 @@ function checkCmdResult(kind, cmd, r) {
 function sql(query) {
   const r = spawnSync(MYSQL,
     ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query],
-    { encoding: 'utf8' });
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   checkCmdResult('SQL', query, r);
   return (r.stdout || '').trim();
 }
@@ -102,7 +102,7 @@ function envGet(key) {
 function redis(...args) {
   const r = spawnSync('docker',
     ['exec', 'fm-redis', 'redis-cli', '-a', envGet('REDIS_PASSWORD'), '--no-auth-warning', ...args],
-    { encoding: 'utf8' });
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   checkCmdResult('REDIS', `redis-cli ${args.join(' ')}`, r);
   return (r.stdout || '').trim();
 }

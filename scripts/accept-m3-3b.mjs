@@ -169,7 +169,7 @@ async function callRaw(method, path, { body, token, local, retryOn401 = true } =
 }
 
 function sql(query) {
-  const r = spawnSync(MYSQL, ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query], { encoding: 'utf8' });
+  const r = spawnSync(MYSQL, ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   checkCmdResult('SQL', query, r);
   return (r.stdout || '').trim();
 }
@@ -203,7 +203,7 @@ function envGet(key) {
 }
 
 function redis(...args) {
-  const r = spawnSync('docker', ['exec', 'fm-redis', 'redis-cli', '-a', envGet('REDIS_PASSWORD'), '--no-auth-warning', ...args], { encoding: 'utf8' });
+  const r = spawnSync('docker', ['exec', 'fm-redis', 'redis-cli', '-a', envGet('REDIS_PASSWORD'), '--no-auth-warning', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   return (r.stdout || '').trim();
 }
 
@@ -229,7 +229,7 @@ async function mqPublish(exchange, routingKey, payload) {
 /** 交换机发布计数（证明消息真的发出去了；计数是 5 秒采集一次，需要轮询） */
 function exchangePublishCount(exchange) {
   const r = spawnSync('curl', ['-s', '-u', `${envGet('RABBITMQ_USER')}:${envGet('RABBITMQ_PASSWORD')}`,
-    '--max-time', '8', `http://localhost:15672/api/exchanges/%2F/${exchange}`], { encoding: 'utf8' });
+    '--max-time', '8', `http://localhost:15672/api/exchanges/%2F/${exchange}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   try {
     return JSON.parse(r.stdout)?.message_stats?.publish_in ?? 0;
   } catch {

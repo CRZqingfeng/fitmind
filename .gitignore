@@ -98,3 +98,9 @@ deploy/upstream.txt
 # 本项目目录下会生成 .workbuddy/memory/（日期日志 + 项目 MEMORY.md），
 # 属于**本机协作状态**、不是源码，不入库（M7-12 开工时补）。
 .workbuddy/
+
+# ==================== 本地临时产物 ====================
+# M11-2/M11-3 验收过程中的临时目录：docx 拆包出的图片切片（`.tmp-plan-doc/`）
+# 与两次绕开沙箱清理的构建产物（`.verify-dist*/`）。都是本机 scratch，不入库。
+.tmp-plan-doc/
+frontend/fitmind-portal/.verify-dist*/

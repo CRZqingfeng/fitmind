@@ -74,11 +74,11 @@ public enum OrderStatus {
         //   用户再也不能对这门课发起退款（常见实现正是这样：REFUNDED 是单向黑洞）。
         //   回滚是**合法的业务流转**而不是错误，所以它必须显式出现在这张表里，
         //   而不是某个 Service 里偷偷 setStatus(PAYED) —— 后者无法审计、无法测试。
-        m.put(PAYED, EnumSet.of(NO_PAY, REFUNDED));
-        m.put(CLOSED, EnumSet.of(NO_PAY));
-        m.put(ENROLLED, EnumSet.of(NO_PAY));
-        m.put(REFUNDED, EnumSet.of(PAYED));
-        m.put(REFUND_SUCCESS, EnumSet.of(REFUNDED));
+        m.put(PAYED, EnumSet.of(NO_PAY, REFUNDED));     // "已支付"可以由"待支付"或"退款中"变过来
+        m.put(CLOSED, EnumSet.of(NO_PAY));              // "已关闭"只能由"待支付"变过来
+        m.put(ENROLLED, EnumSet.of(NO_PAY));            // "已报名"只能由"待支付"变过来
+        m.put(REFUNDED, EnumSet.of(PAYED));             // "退款中"只能由"已支付"变过来
+        m.put(REFUND_SUCCESS, EnumSet.of(REFUNDED));    // "已退款"只能由"退款中"变过来
         TRANSITIONS = Collections.unmodifiableMap(m);
     }
 

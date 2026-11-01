@@ -103,9 +103,17 @@ export function pageOrders(params: {
   return http.get<PageDTO<Order>>('/ts/orders/page', { params })
 }
 
-/** 订单详情（含明细，★ 明细里才有 courseId，退款要用） */
-export function getOrder(id: string): Promise<Order> {
-  return http.get<Order>(`/ts/orders/${id}`)
+/**
+ * 订单详情（含明细，★ 明细里才有 courseId，退款要用）。
+ *
+ * `silent`：**支付页专用**（M6-8）。支付页会用一个"错误空态"清楚地说明
+ * "订单不存在或已关闭"，此时再弹一个全局红条纯属噪音 ——
+ * 而且那句兜底文案（"系统繁忙，请稍后再试"）对"订单不存在"并不准确，
+ * **页面已经说对了的事，不该被一个更差的文案盖过去**。
+ * 默认仍是"全局提示"，所以其它调用方（订单详情页等）行为不变。
+ */
+export function getOrder(id: string, opts: { silent?: boolean } = {}): Promise<Order> {
+  return http.get<Order>(`/ts/orders/${id}`, { silent: opts.silent })
 }
 
 /**

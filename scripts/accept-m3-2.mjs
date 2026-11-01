@@ -144,7 +144,7 @@ async function callRaw(method, path, { body, token, local } = {}) {
 }
 
 function sql(query) {
-  const r = spawnSync(MYSQL, ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query], { encoding: 'utf8' });
+  const r = spawnSync(MYSQL, ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   checkCmdResult('SQL', query, r);
   return (r.stdout || '').trim();
 }
@@ -178,7 +178,7 @@ function envGet(key) {
 }
 
 function redis(...args) {
-  const r = spawnSync('docker', ['exec', 'fm-redis', 'redis-cli', '-a', envGet('REDIS_PASSWORD'), '--no-auth-warning', ...args], { encoding: 'utf8' });
+  const r = spawnSync('docker', ['exec', 'fm-redis', 'redis-cli', '-a', envGet('REDIS_PASSWORD'), '--no-auth-warning', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   return (r.stdout || '').trim();
 }
 
@@ -189,7 +189,7 @@ function rabbitAuth() {
 /** 交换机发布计数（证明事件真的发出去） */
 function exchangePublishCount() {
   const r = spawnSync('curl', ['-s', '-u', `${envGet('RABBITMQ_USER')}:${envGet('RABBITMQ_PASSWORD')}`, '--max-time', '8',
-    'http://localhost:15672/api/exchanges/%2F/learning.topic'], { encoding: 'utf8' });
+    'http://localhost:15672/api/exchanges/%2F/learning.topic'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   try { return JSON.parse(r.stdout)?.message_stats?.publish_in ?? 0; } catch { return null; }
 }
 
@@ -305,9 +305,18 @@ async function main() {
 
   const seasons = await call('GET', '/ls/boards/seasons/list', { token });
   const seasonList = seasons.json?.data || [];
-  check('赛季种子数据存在（本月+上月）', seasonList.length >= 2, `seasonCount=${seasonList.length}`);
-  const currentSeason = seasonList[0];
-  const lastSeason = seasonList[1];
+  // ★★ 赛季列表的语义在 #C41 里被改过一次：**只返回「已结束」的赛季**（原来是「已开始」）。
+  //    ⚠️ 断言别写成「本月+上月」—— 种子里是「上月+本月」（sql/fm_learning_m3_2.sql:37），
+  //    过滤掉进行中的那个月之后**只剩 1 个**，写 >=2 会假失败。
+  check('★ 赛季列表非空，且只含「已结束」的赛季', seasonList.length >= 1, `seasonCount=${seasonList.length}`);
+  // ★★ 不能出现「正在进行」的赛季：它的分表要到下月 1 号结算时才建（PointsBoardJob#createTableJob），
+  //    列出来就是一个**点开必然为空**的选项，而且与「当前赛季（实时）」是同一个月的两个入口。
+  const todayStr = new Date().toISOString().slice(0, 10);
+  check('★★ 列表不含「正在进行」的赛季（否则就是个必然为空的选项）',
+    seasonList.every((s) => String(s.endTime) < todayStr),
+    `today=${todayStr}, ends=[${seasonList.map((s) => s.endTime).join(', ')}]`);
+  // ★ 最近的已结束赛季 = 上个月（列表按 beginTime 倒序）
+  const lastSeason = seasonList[0];
 
   const ensureNext = await call('GET', '/boards/internal/ensure-season', { local: 8086 });
   check('★ 内部接口可免登录访问 + 赛季自动滚动（创建下月赛季）',
@@ -469,8 +478,65 @@ async function main() {
   check('★ 我的排名正确（ZREVRANK 0-based +1）', board.json?.data?.rank === rankFromRedis,
     `api=${board.json?.data?.rank}, redis=${rankFromRedis}`);
 
-  // ==================== 7. 赛季结算（分片广播） ====================
-  section('7. ★ 赛季结算：建表 → 落库 → 清缓存');
+  // ==================== 7. 未结算赛季的流水兜底（#C42） ====================
+  section('7. ★ 未结算赛季：分表不存在时用积分流水兜底');
+  // 造一个「已结束但从未结算」的赛季：3 个月前。
+  // ★ 为什么不复用 lastSeason：§8 会去给 lastSeason 建表（顺序耦合），而且它可能残留过表。
+  //   这里从 ensure-season 现造一个，只依赖「种子里没有 3 个月前那个月」，与库/页面的当前状态解耦。
+  const probeMonth = new Date(today.getFullYear(), today.getMonth() - 3, 1);
+  const probeMonthStr = `${probeMonth.getFullYear()}-${pad(probeMonth.getMonth() + 1)}`;
+  const probeSeasonRes = await call('GET', `/boards/internal/ensure-season?month=${probeMonthStr}`, { local: 8086 });
+  const probeSeasonId = Number(probeSeasonRes.text);
+  check('已备好一个「已结束但未结算」的赛季', Number.isInteger(probeSeasonId) && probeSeasonId > 0,
+    `month=${probeMonthStr}, id=${probeSeasonRes.text}`);
+  const probeTableCount = sql(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='fm_learning' AND table_name='points_board_${probeSeasonId}'`);
+  check('前提成立：该赛季的分表**确实不存在**（等价于「结算任务从没跑过」）',
+    probeTableCount === '0', `count=${probeTableCount}`);
+
+  // 往流水里塞一条这个月的积分（biz_id 带标记，异常中断时便于人工兜底清理）
+  const FALLBACK_BIZ = '__m3_2_fallback_probe__';
+  sql(`DELETE FROM fm_learning.points_record WHERE biz_id='${FALLBACK_BIZ}'`);
+  sql(`INSERT INTO fm_learning.points_record (user_id, type, points, biz_id, create_time) VALUES (${userId}, 5, 77, '${FALLBACK_BIZ}', '${probeMonthStr}-15 10:00:00')`);
+  check('探针积分已写入流水', sql(`SELECT COUNT(*) FROM fm_learning.points_record WHERE biz_id='${FALLBACK_BIZ}'`) === '1');
+
+  const fb = await call('GET', `/ls/boards?season=${probeSeasonId}&pageNo=1&pageSize=10`, { token });
+  const fbList = fb.json?.data?.boardList || [];
+  // ★★ 修前这里返回的是**空榜**（异常被 catch 吞掉后 return List.of()），
+  //    用户看到「榜单还没有数据」，与「这个赛季真的没人得分」完全一样 —— 这就是 #C42。
+  check('★★ 分表不存在时不再返回空榜，而是用积分流水实时重算',
+    fbList.length === 1 && fbList[0]?.points === 77, `len=${fbList.length}, points=${fbList[0]?.points}`);
+  check('★★「我的积分」也来自兜底（修前这里是 0/未上榜，用户会以为这赛季自己没得分）',
+    fb.json?.data?.points === 77, `points=${fb.json?.data?.points}`);
+  check('★ 兜底路径的名次从 1 开始', fbList[0]?.rank === 1, `rank=${fbList[0]?.rank}`);
+
+  // ★★ 负向断言：兜底**只认明细**，不合并实时榜。
+  //    曾经的实现会把"榜里独有、明细里没有的人"补进来（为了迁就验收脚本删明细不回滚榜造成的脏数据），
+  //    后来去掉 —— 脏数据应该直接把分表补对，而不是让每次历史查询都去兼容它（见 #C42 / #C43）。
+  const probeBoardKey = `boards:${probeMonth.getFullYear()}${pad(probeMonth.getMonth() + 1)}`;
+  redis('ZADD', probeBoardKey, '999', '10086');
+  const fb2 = await call('GET', `/ls/boards?season=${probeSeasonId}&pageNo=1&pageSize=10`, { token });
+  const fb2List = fb2.json?.data?.boardList || [];
+  check('★★ 榜里独有的人**不会**被合并进来（口径只有明细；这条钉住"不做跨源合并"的决定）',
+    fb2List.length === 1 && fb2List[0]?.points === 77,
+    `len=${fb2List.length}, points=${fb2List.map((r) => r.points).join('/')}`);
+  redis('DEL', probeBoardKey);
+
+  // 边界：赛季 id 不存在 → 返回 200 + 空榜，**不能炸 500**（老行为不能退化）
+  const bogusSeason = await call('GET', '/ls/boards?season=99999&pageNo=1&pageSize=10', { token });
+  check('不存在的赛季 id 返回 200 + 空榜（不炸 500）',
+    bogusSeason.status === 200 && (bogusSeason.json?.data?.boardList || []).length === 0,
+    `status=${bogusSeason.status}, code=${bogusSeason.json?.code}`);
+
+  // 清理：探针积分 + 现造的赛季行（不清的话它会一直挂在下拉里）
+  sql(`DELETE FROM fm_learning.points_record WHERE biz_id='${FALLBACK_BIZ}'`);
+  sql(`DELETE FROM fm_learning.points_board_season WHERE id=${probeSeasonId}`);
+  const fbLeft = sql(`SELECT COUNT(*) FROM fm_learning.points_record WHERE biz_id='${FALLBACK_BIZ}'`);
+  const seasonLeft = sql(`SELECT COUNT(*) FROM fm_learning.points_board_season WHERE id=${probeSeasonId}`);
+  check('兜底验证的探针已清理（积分明细 + 赛季行）', fbLeft === '0' && seasonLeft === '0',
+    `points_record=${fbLeft}, season=${seasonLeft}`);
+
+  // ==================== 8. 赛季结算（分片广播） ====================
+  section('8. ★ 赛季结算：建表 → 落库 → 清缓存');
   const createTable = await call('GET', `/boards/internal/create-table?season=${lastSeason?.id}`, { local: 8086 });
   check('内部接口建分表成功', createTable.status === 200, `status=${createTable.status}`);
   const tableExists = sql(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='fm_learning' AND table_name='points_board_${lastSeason?.id}'`);
@@ -502,15 +568,15 @@ async function main() {
   check('内部接口清理 Redis 成功', clearRes.status === 200);
   check('★ 上月榜单 key 已删除', redis('EXISTS', lastKey) === '0', `exists=${redis('EXISTS', lastKey)}`);
 
-  // ==================== 8. 鉴权 ====================
-  section('8. 鉴权');
+  // ==================== 9. 鉴权 ====================
+  section('9. 鉴权');
   const noTokenSign = await call('POST', '/ls/sign-records');
   check('未登录签到被拦截 401', noTokenSign.status === 401, `status=${noTokenSign.status}`);
   const noTokenBoard = await call('GET', '/ls/boards');
   check('未登录查榜单被拦截 401', noTokenBoard.status === 401, `status=${noTokenBoard.status}`);
 
-  // ==================== 9. 清理 ====================
-  section('9. 清理测试数据');
+  // ==================== 10. 清理 ====================
+  section('10. 清理测试数据');
   await call('POST', '/cs/courses/downShelf', { token, body: { id: course.courseId } });
   await call('DELETE', `/cs/courses/delete/${course.courseId}`, { token });
   if (course.categoryId) await call('DELETE', `/cs/categorys/${course.categoryId}`, { token });

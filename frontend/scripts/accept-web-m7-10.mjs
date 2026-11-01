@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { chromium } from 'playwright'
+import { launchBrowser } from './_cdp-browser.mjs'
 
 const PORTAL = 'http://localhost:5173'
 const ADMIN = 'http://localhost:5174'
@@ -112,7 +113,7 @@ async function loginByApi(page, base, path, phone, tokenKey) {
 
 async function main() {
   mkdirSync(SHOT_DIR, { recursive: true })
-  const browser = await chromium.launch({ channel: 'msedge' })
+  const browser = await launchBrowser()
   const admin = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage()
   const portal = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage()
 

@@ -37,6 +37,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { chromium } from 'playwright'
+import { launchBrowser } from './_cdp-browser.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SHOT_DIR = join(HERE, '..', '..', 'docs', 'screenshots')
@@ -77,15 +78,8 @@ function formatFen(fen) {
   return `¥${(fen / 100).toFixed(2)}`
 }
 
-async function launchBrowser() {
-  try {
-    return await chromium.launch()
-  } catch (err) {
-    if (!/Executable doesn't exist/i.test(String(err?.message ?? ''))) throw err
-    console.log('  ⚠️ 未找到 Playwright 自带 Chromium，回退使用系统 Edge（channel=msedge）')
-    return await chromium.launch({ channel: 'msedge' })
-  }
-}
+// ★ 浏览器连接统一见 ./_cdp-browser.mjs —— 本机必须走 CDP，
+//   `chromium.launch({ channel: 'msedge' })` 在这里一定失败（见模块头部说明）。
 
 async function requireReachable(url, name) {
   try {

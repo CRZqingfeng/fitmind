@@ -49,6 +49,7 @@ public class ChatMemoryStore {
         }
         try {
             String key = AigcConstants.memoryKey(sessionId);
+            // 当前提问写进  Redis: RPUSH aigc:mem:session_888 {"role":"user","content":"顺便帮我找..."}
             redis.opsForList().rightPush(key, JSONUtil.createObj()
                     .set("role", role)
                     .set("content", content)

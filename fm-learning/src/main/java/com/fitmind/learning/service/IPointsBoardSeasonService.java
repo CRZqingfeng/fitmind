@@ -31,6 +31,11 @@ public interface IPointsBoardSeasonService extends IService<PointsBoardSeason> {
      */
     Integer ensureSeason(LocalDate month);
 
-    /** 查询已开始的赛季列表（按开始时间倒序） */
+    /**
+     * 查询**已结束**的赛季列表（按开始时间倒序）。
+     *
+     * <p>★ 只返回已结束的：正在进行中的赛季没有分表（要到下月 1 号结算时才建），
+     * 列出来就是一个必然为空的选项。当前赛季由「当前赛季（实时）」代表。</p>
+     */
     List<PointsBoardSeasonVO> querySeasonList();
 }

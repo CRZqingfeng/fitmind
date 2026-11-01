@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { MagicStick, Plus, Promotion, Setting } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -93,6 +93,20 @@ const sessionPage = ref(1)
 const sessionLoading = ref(false)
 const sessionId = ref<string | null>(null)
 
+/**
+ * 生成一个会话 id（**首轮就带上**，理由见 `send()` 里那段说明）。
+ *
+ * ★ 格式没有约束：`chat_session.session_id` 是 `varchar(64)`，后端**不做数字解析**
+ *   （列注释写的就是"会话id（前端生成或服务端回填）"）。
+ *   这里用 32 位十六进制而不是仿雪花 id —— 与后端生成的 id **一眼能区分开**，
+ *   排查"这条会话是谁建的"时反而方便（验收脚本用的是 `accept-m66-stat-…`，同理）。
+ */
+function newSessionId(): string {
+  // crypto.randomUUID 只在安全上下文（https / localhost）可用，留一个降级分支
+  const uuid = globalThis.crypto?.randomUUID?.()
+  return uuid ? uuid.replaceAll('-', '') : `f${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`
+}
+
 // ---------- 对话 ----------
 const messages = ref<LocalMessage[]>([])
 const draft = ref('')
@@ -118,16 +132,71 @@ const goalOptions = [
 ]
 
 /** 快速提问：四条各展示一种能力（工具卡片 / 下单卡片 / 知识依据 / 直答） */
+/**
+ * ★ 第 2 条刻意用「541 · 哑铃手臂线条塑造」——**演示账号当前未购买**的付费课
+ *   （已购的是 535 / 539 / 542，见 M6-8 #3）。
+ *
+ *   为什么要专门挑一门没买过的：这条快捷项演示的是"下单成功"，
+ *   而用一门已购课程点下去，用户看到的是"下单失败：你已经买过了" ——
+ *   同一个按钮，一次演示"功能正常"、一次演示"功能坏了"。
+ *
+ *   ★ 文案里带上**课程名**而不只是 id：buy 提示词要求模型"先用 searchCourses
+ *   确认课程真实存在"，只给一个数字（"541"）在关键词检索里搜不出东西，
+ *   模型的正确路径会被自己的约束挡住。
+ */
 const quickPrompts = [
   { text: '我想增肌，有什么哑铃课程推荐？', tip: '触发工具 → 课程卡片' },
-  { text: '帮我买课程 535', tip: '触发工具 → 待支付订单卡片' },
+  { text: '帮我买课程 541（哑铃手臂线条塑造）', tip: '触发工具 → 生成可支付的订单' },
   { text: '硬拉的时候腰疼是什么原因？', tip: '触发知识库 → 引用来源' },
-  { text: '今天练什么好？', tip: '不需要知识库，直答' },
+  // ★ #11：这条 tip 原来写的是"不需要知识库，直答" —— 而**默认策略是智能路由**，
+  //   智能路由下这个问题会先花一次调用判路由，命中的是「推荐」Agent，**不会走直答**。
+  //   tip 是给用户看"点下去会发生什么"的，写错了比不写更误导。
+  { text: '今天练什么好？', tip: '智能路由 → 推荐课程' },
 ]
 
 const currentTypeDesc = computed(
   () => CHAT_TYPES.find((t) => t.value === chatType.value)?.desc ?? '',
 )
+
+/** 当前策略的中文标签（左侧恒显的那一段） */
+const chatTypeText = computed(() => chatTypeLabel(chatType.value))
+
+/**
+ * 当前选中的训练目标**中文**（#6）。
+ *
+ * ★ 以前这里直接渲染 `goal`（`muscle_gain` / `fat_loss` 这种枚举值），
+ * 用户看到的是"知识库按「muscle_gain」过滤" —— 一句半英半中的话。
+ * 同一个 `goalOptions` 里明明有 `label`，顺手映射一下就好。
+ */
+const goalText = computed(() => goalOptions.find((g) => g.value === goal.value)?.label ?? '')
+
+/**
+ * ★★ 本轮**是否确实会走知识库检索**（#6 / #16）—— 决定右半段提示显不显示。
+ *
+ * <p>以前这里是一个**三选一**（`v-if="streaming"` / `v-else-if="goal"` / `v-else`），
+ * 所以"当前策略"和目标提示**互相排斥**：只要选了目标，就再也看不到自己现在是什么策略。
+ * 更糟的是 —— **只要选了目标就显示"知识库按…过滤"**，
+ * 哪怕策略是「直答」（一次检索都不会发）。**这已经不是文案问题，是在说假话。**</p>
+ *
+ * <p>判据按策略分三种：</p>
+ * <ul>
+ *   <li><b>增强检索（ENHANCE）</b>：一定先检索 → <b>显示</b>；</li>
+ *   <li><b>直答（SIMPLE）</b>：一定不检索 → <b>不显示</b>；</li>
+ *   <li><b>智能路由（ROUTE）</b>：发送前**无法预知**（要等路由结果）→
+ *       退而用**上一轮的实际结果**当提示；没有上一轮就<b>不显示</b>
+ *       —— <b>宁可少说一句，也不要瞎说一句</b>。</li>
+ * </ul>
+ */
+const willRetrieve = computed(() => {
+  if (chatType.value === 'ENHANCE') {
+    return true
+  }
+  if (chatType.value === 'SIMPLE') {
+    return false
+  }
+  // 智能路由：只有"上一轮真的检索到了东西"才敢说这一轮也会检索
+  return Number(lastMetrics.value?.ragHits ?? 0) > 0
+})
 
 /**
  * 最近一轮的引用明细 —— 给调试面板用。
@@ -144,9 +213,36 @@ const lastRag = computed(() => {
 /** 是否贴底（决定要不要自动滚动）—— 见 scrollToBottom 的说明 */
 let stickToBottom = true
 
-onMounted(async () => {
+/**
+ * 首屏加载（只会真正跑一次）。
+ *
+ * ★★ M6-8 #10：**未登录时不发鉴权请求**。
+ *   `sessions` / `provider` / `quota` 都是需要登录的接口（`/ais/chat/**` 登录即可），
+ *   而冷启动直接进 `/ai` 时登录态可能还没就绪 → 这一批请求会**必然 401**，
+ *   控制台一下子一串红，顶栏还会闪一下"未登录"。
+ *
+ * ★ 先排除一个容易走偏的猜测：**不是"拦截器读不到 token"**。
+ *   token 是**同步**从 localStorage 读的（`utils/token.ts` 的模块级 `readFromStorage()`），
+ *   拦截器每次都拿得到。真正的意思是"这次会话本来就没有登录态"——
+ *   那就更不该发这三个请求。
+ */
+let bootstrapped = false
+async function bootstrap() {
+  if (bootstrapped || !auth.isLogin) return
+  bootstrapped = true
   await Promise.all([loadSessions(), loadProvider(), loadQuota()])
-})
+}
+
+onMounted(bootstrap)
+
+// ★ 登录态**晚于**首屏就绪时补一次（冷启动 token 恢复、或刚登录完跳过来）。
+//   与上面的 `bootstrapped` 配合，保证"该加载的一定会加载、且只加载一次"。
+watch(
+  () => auth.isLogin,
+  (v) => {
+    if (v) void bootstrap()
+  },
+)
 
 onBeforeUnmount(() => {
   // 离开页面要把在途的流断掉：否则它会继续跑（并在后台改一份已经没人看的组件状态）
@@ -202,7 +298,17 @@ async function loadMemory() {
 // 会话切换
 // ============================================================
 
-function startNewSession() {
+async function startNewSession() {
+  // ★★ 正在生成时，必须**先通知后端停止**，再清空界面（M6-8 #7）。
+  //   只 `abort()` 本地流的话：后端那一轮的生成标记还在，它会把整段回答
+  //   继续生成完才收尾（白烧模型 token、工具可能继续执行）——
+  //   而前端已经把消息清空了，用户**完全看不到这段消耗**。
+  //   ★ 与 `openSession` 的处理是一对：那边"拦下来不让切"（提示先停止），
+  //     这边"先停再清"—— 因为"新对话"的意图本来就是"我想重新开始"，
+  //     先停比拦住更顺，且不会让用户多一步操作。
+  if (streaming.value) {
+    await stop()
+  }
   handle?.abort()
   sessionId.value = null
   messages.value = []
@@ -249,7 +355,18 @@ function toLocalMessage(m: ChatMessage): LocalMessage {
     cards: params?.cards ?? [],
     rag: params?.rag ?? null,
     toolCalls: m.toolCalls ?? null,
-    metrics: null,
+    // ★★ #17：历史消息也带上指标 —— 以前这里恒为 `null`，
+    //   于是"切回旧会话，助手回答下面那条指标行整行消失"，
+    //   看起来像"历史消息是另一种消息"。
+    //
+    //   ⚠️ **能补的只有 3 项**（后端 `ChatMessageVO` 只存了这些）：Agent / 首字延迟 / 总耗时。
+    //   ★ **"策略"补不了** —— `chat_message` 表里根本没存 `chatType`。
+    //     所以历史行的指标**天然比实时少一项**，这是**如实呈现**，不是"做得像一样"。
+    //     （要补全就得给消息表加字段，那是另一件事。）
+    metrics:
+      m.role === 'assistant' && (m.agentType || m.firstTokenMs != null || m.totalMs != null)
+        ? { agentType: m.agentType, firstTokenMs: m.firstTokenMs, totalMs: m.totalMs }
+        : null,
     streaming: false,
     stopped: false,
     error: null,
@@ -356,12 +473,25 @@ async function send(text?: string) {
     }
   }
 
+  // ★★ 首轮就自带 sessionId（M6-8 #8）—— 这不是"前端乱造 id"，而是本项目的**既定设计**：
+  //   `chat_session.session_id` 的列注释写着"会话id（**前端生成**或服务端回填）"，
+  //   后端 `getOrCreate` 也专门为此写了注释（"前端带一个库里没有的 sessionId 是正常情况…直接按它建库"），
+  //   只是前端一直没这么做（等后端在 STOP 里回填）。
+  //
+  // ★ **为什么必须这样：不这样的话，首轮就停不掉。**
+  //   `POST /ais/chat/stop` 只认 sessionId（`ChatStopDTO` **刻意**不收 requestId，理由是
+  //   "前端手上的可能是上一轮的 id，于是点了停止却停不掉当前这轮"）。
+  //   而首轮 sessionId 为 null → 点"停止"只能 abort 本地的流，
+  //   后端那一轮**照样把整段回答生成完**（白烧模型 token、工具可能继续执行）。
+  const isNewSession = !sessionId.value
+  if (isNewSession) sessionId.value = newSessionId()
+
   handle = chatStream(
     {
       content,
       chatType: chatType.value,
-      // 不传 sessionId = 新建会话（后端生成并把 id 放在 STOP 里回来）
-      ...(sessionId.value ? { sessionId: sessionId.value } : {}),
+      // ★ 这里一定有值（上一行刚保证），但 TS 推断不出来，用 ?? undefined 收窄
+      sessionId: sessionId.value ?? undefined,
       ...(goal.value ? { goal: goal.value } : {}),
     },
     {
@@ -383,11 +513,12 @@ async function send(text?: string) {
         answer.stopped = !!payload.stopped
         answer.streaming = false
         lastMetrics.value = payload
-        // 首轮才有 sessionId（之后同会话复用），拿到后要刷新左侧列表（标题是新生成的）
-        if (payload.sessionId && payload.sessionId !== sessionId.value) {
-          sessionId.value = payload.sessionId
-          void loadSessions()
-        }
+        // ★ 首轮：会话是服务端**刚建好**的（标题也是刚生成的），要刷新左侧列表让它出现。
+        //   ⚠️ 不能再用"payload.sessionId !== sessionId.value"来判断"是不是首轮"了 ——
+        //   现在首轮前端就把 id 带过去了，后端回的是**同一个值**，那个条件永远不成立
+        //   （这是"改成首轮自带 id"之后必须跟着改的一处，否则新会话不会出现在列表里）。
+        if (payload.sessionId) sessionId.value = payload.sessionId
+        if (isNewSession) void loadSessions()
         void loadMemory()
         void loadQuota()
       },
@@ -430,7 +561,15 @@ async function stop() {
     last.streaming = false
   }
   streaming.value = false
-  ElMessage.info(stoppedRequestId ? '已停止生成' : '当前没有正在生成的回答')
+  // ★ 文案按"用户确实中断了一条在途生成"来定（M6-8 #8）。
+  //   原来写的是 `stoppedRequestId ? '已停止生成' : '当前没有正在生成的回答'`，
+  //   但**后面那句话永远不该出现在这个函数里** —— 函数开头的
+  //   `if (!streaming.value) return` 已经保证了"确实有一条在途的流"。
+  //   首轮（还没有 sessionId）时后端必然返回 null，于是弹出"当前没有正在生成的回答"，
+  //   与"前端刚 abort 了一条流、回答也确实停住了"自相矛盾。
+  ElMessage.info('已停止生成')
+  // 后端说"该会话当前没有在途生成"时不吞掉这个信息，但也不让用户困惑（只记 console）
+  if (!stoppedRequestId) console.debug('[AiCoach] stop: 后端该会话当前无在途生成，仅中断了本地流')
 }
 
 // ============================================================
@@ -549,7 +688,13 @@ function metricLine(m: LocalMessage): string {
           <el-select v-model="chatType" size="small" class="type-select" data-testid="ai-chattype">
             <el-option v-for="t in CHAT_TYPES" :key="t.value" :value="t.value" :label="t.label" />
           </el-select>
-          <el-select v-model="goal" size="small" class="goal-select" placeholder="目标">
+          <el-select
+            v-model="goal"
+            size="small"
+            class="goal-select"
+            placeholder="目标"
+            data-testid="ai-goal"
+          >
             <el-option v-for="g in goalOptions" :key="g.value" :value="g.value" :label="g.label" />
           </el-select>
           <el-button
@@ -651,10 +796,21 @@ function metricLine(m: LocalMessage): string {
           @keydown.enter.exact.prevent="send()"
         />
         <div class="composer-actions">
+          <!--
+            ★★ #6 / #16：拆成**两段、不再互斥**。
+              左段「当前策略」**恒显**（含生成中）—— 它回答的是"我这次点发送会怎么走"，
+              是一句永远成立的话；右段是**条件**提示，只在"这一轮确实会检索"时才出现。
+          -->
           <span class="composer-tip">
-            <template v-if="streaming">正在生成…</template>
-            <template v-else-if="goal">知识库按「{{ goal }}」过滤</template>
-            <template v-else>当前策略：{{ chatTypeLabel(chatType) }}</template>
+            <span data-testid="ai-tip-chattype">当前策略：{{ chatTypeText }}</span>
+            <template v-if="streaming">
+              <span class="tip-sep">·</span>
+              <span>正在生成…</span>
+            </template>
+            <template v-else-if="willRetrieve && goalText">
+              <span class="tip-sep">·</span>
+              <span data-testid="ai-tip-goal">知识库按「{{ goalText }}」过滤</span>
+            </template>
           </span>
           <el-button
             v-if="streaming"
@@ -1076,5 +1232,11 @@ function metricLine(m: LocalMessage): string {
   margin-right: auto;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+/* 两段提示之间的分隔符（#6/#16 拆段后才需要） */
+.tip-sep {
+  margin: 0 6px;
+  color: var(--el-text-color-placeholder);
 }
 </style>

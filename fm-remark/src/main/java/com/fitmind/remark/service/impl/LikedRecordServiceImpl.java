@@ -46,7 +46,7 @@ public class LikedRecordServiceImpl extends ServiceImpl<LikedRecordMapper, Liked
 
     @Override
     public void addLikeRecord(LikeRecordFormDTO dto) {
-        // 1.按前端传的 liked 走「点赞」或「取消」——两者的共同点是：
+        // 1.按前端传的 liked 走 like「点赞」或 unlike「取消」——两者的共同点是：
         //   返回值表示"本次是否真的产生了变更"，false 就说明是重复操作
         boolean effective = Boolean.TRUE.equals(dto.getLiked()) ? like(dto) : unlike(dto);
         if (!effective) {

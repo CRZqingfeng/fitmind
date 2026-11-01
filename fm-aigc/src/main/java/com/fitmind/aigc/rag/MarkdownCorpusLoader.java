@@ -63,6 +63,7 @@ public class MarkdownCorpusLoader {
         } catch (IOException e) {
             throw new IllegalStateException("知识语料加载失败（检查路径：" + location + "）：" + e.getMessage(), e);
         }
+        // 加载失败必须抛异常，不能静默返回空
         if (result.isEmpty()) {
             throw new IllegalStateException("知识语料为空（" + location + "）—— 检索会永远返回空，"
                     + "而表现是'AI 什么都不知道'，很容易被误判成阈值或模型问题");

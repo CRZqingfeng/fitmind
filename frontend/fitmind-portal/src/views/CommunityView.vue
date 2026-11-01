@@ -80,7 +80,28 @@ const questions = ref<Question[]>([])
 const questionTotal = ref(0)
 const qPageNo = ref(1)
 const qPageSize = ref(10)
-const onlyMineQ = ref(false)
+
+/**
+ * 问答区的「广场页签」：待回答 / 最新 / 最热 / 我的（M10-1 第 3 期）。
+ *
+ * ★ 「待回答」= `answer_times = 0`。它不只是个筛选 —— 它同时是**社区的价值洼地**
+ *   （真人的贡献入口），以及将来 **AI 机器人的唯一作业区**（只补空位、不抢已被回答的问题）。
+ */
+const qFeed = ref<'new' | 'unanswered' | 'hot' | 'mine'>('new')
+
+/**
+ * 页签 → 请求参数。
+ *
+ * ⚠️ **这里刻意不碰 `scope`** —— 全站与否只由 `contextParams()`（有没有选课程）决定。
+ *    否则"选了课程 + 最热"会同时带上 `courseId` 和 `scope=ALL`，
+ *    请求参数与改造前不一致；而 m7-5 正是拿"同 courseId"去对账页面的。
+ */
+const qFeedParams = computed<{ unanswered?: boolean; sort?: 'hot'; onlyMine?: boolean }>(() => {
+  if (qFeed.value === 'unanswered') return { unanswered: true }
+  if (qFeed.value === 'hot') return { sort: 'hot' }
+  if (qFeed.value === 'mine') return { onlyMine: true }
+  return {}
+})
 
 const askVisible = ref(false)
 const askSubmitting = ref(false)
@@ -125,14 +146,27 @@ const noteSectionsOfChapter = computed(
 )
 
 /** 列表接口共用的上下文参数：★ 只传一个（选了动作就按动作，否则按课程） */
-function contextParams() {
-  return selectedSectionId.value
-    ? { sectionId: selectedSectionId.value }
-    : { courseId: selectedCourseId.value }
+/**
+ * 列表接口共用的上下文参数。
+ *
+ * ★★ M10-1 第 3 期：没有再选一门课时，**不再"不查"，而是显式声明 `scope=ALL`**
+ *    → 这才是"答疑广场"（跨课程看全站）。
+ *
+ * ⚠️ `scope` **必须显式传**：后端对"不带 course/section 且不带 scope"的请求**仍然返回 400** ——
+ *    那条校验有 3 条负向断言钉着（`accept-web-m7-5.mjs:262-273`，测试标题写着"假绿过一次的地方"），
+ *    所以它是"用一个显式开关放开"，而不是"删掉校验"。
+ *
+ * ⚠️ 反过来，**有课程上下文时这里不返回 `scope`** —— 保证请求参数与改造前**一字不差**
+ *    （m7-5 就是拿 `/ls/questions/page?...&courseId=X` 去对账的）。
+ */
+function contextParams(): { courseId?: string; sectionId?: string; scope?: 'ALL' } {
+  if (selectedSectionId.value) return { sectionId: selectedSectionId.value }
+  if (selectedCourseId.value) return { courseId: selectedCourseId.value }
+  return { scope: 'ALL' }
 }
 
+/** 是否处于"某门课的上下文"里（false = 正在看全站广场）—— 只用于提示文案与按钮禁用 */
 const hasContext = computed(() => Boolean(selectedCourseId.value))
-
 onMounted(async () => {
   await loadMyLessons()
 })
@@ -147,21 +181,42 @@ watch([selectedCourseId, selectedSectionId], async ([cid], [oldCid]) => {
   await Promise.all([loadQuestions(), loadNotes()])
 })
 
+/** 切换广场页签（待回答/最新/最热/我的）→ 只重拉问答列表（笔记与它无关） */
+watch(qFeed, () => {
+  qPageNo.value = 1
+  void loadQuestions()
+})
+
 async function loadMyLessons() {
   lessonsLoading.value = true
   try {
     myLessons.value = (await pageMyLessons({ pageNo: 1, pageSize: 100 }))?.list ?? []
-    // 优先用 URL 带来的课程；否则用我的课程第一门（这样页面一进来就有内容看）
-    const preferred =
-      (ctxCourseId.value && myLessons.value.some((l) => String(l.courseId) === ctxCourseId.value)
+    /**
+     * ★★ M10-1 第 3 期：**不再自动选中第一门课**。
+     *
+     * 原来这里是 `|| String(myLessons.value[0]?.courseId ?? '')` —— 于是"社区"实际变成了
+     * **"我的第一门课的问答列表"**，两个后果：
+     *   ① 跨课程的热门问题永远浮不上来（社区失去"逛"的价值）；
+     *   ② 没报名任何课程的人进来是**整页空**（直接劝退）。
+     * 现在：URL 带了 courseId 才选中（并从学习页/课程详情跳进来的场景保持原行为），
+     * 否则留空 = **全站广场**。
+     */
+    selectedCourseId.value =
+      ctxCourseId.value && myLessons.value.some((l) => String(l.courseId) === ctxCourseId.value)
         ? ctxCourseId.value
-        : '') || String(myLessons.value[0]?.courseId ?? '')
-    selectedCourseId.value = preferred
+        : ''
     if (ctxSectionId.value) selectedSectionId.value = ctxSectionId.value
-    if (!preferred) {
-      // 没有课程 → 没有上下文 → 列表接口会 400，直接不调用
-      await Promise.all([loadQuestions(), loadNotes()])
-    }
+    if (selectedCourseId.value) await loadCatalogs(selectedCourseId.value)
+
+    /**
+     * ★★ 首次加载**必须在这里显式做**，不能指望下面那个 `watch`。
+     *
+     * 踩过一次（2026-10-04，改造后第一次跑验收）：无 URL 上下文时
+     * `selectedCourseId` 是 `'' → ''` —— **值根本没变**，watch 不触发，
+     * 于是广场**永远不加载**，页面显示"共 0 个问题"而接口明明有 3 条。
+     * （有上下文时会与 watch 各拉一次；重复的是一次幂等 GET，可忽略。）
+     */
+    await Promise.all([loadQuestions(), loadNotes()])
   } catch {
     myLessons.value = []
   } finally {
@@ -181,18 +236,15 @@ async function loadCatalogs(courseId: string) {
 
 // ---------- 问答 ----------
 async function loadQuestions() {
-  if (!hasContext.value) {
-    questions.value = []
-    questionTotal.value = 0
-    return
-  }
+  // ★ M10-1 第 3 期：**没有课程上下文也能查**（那就是全站广场，走 `scope=ALL`），
+  //   所以这里不再有"无上下文就清空返回"的短路。
   loading.value = true
   try {
     const page = await pageQuestions({
       pageNo: qPageNo.value,
       pageSize: qPageSize.value,
-      onlyMine: onlyMineQ.value || undefined,
       ...contextParams(),
+      ...qFeedParams.value,
     })
     questions.value = page?.list ?? []
     questionTotal.value = pageTotal(page)
@@ -274,11 +326,7 @@ async function removeQuestion(q: Question) {
 
 // ---------- 笔记 ----------
 async function loadNotes() {
-  if (!hasContext.value) {
-    notes.value = []
-    noteTotal.value = 0
-    return
-  }
+  // ★ M10-1 第 3 期：同 `loadQuestions` —— 没有课程上下文就是全站广场（`scope=ALL`），不再短路
   loading.value = true
   try {
     const page = await pageNotes({
@@ -420,20 +468,23 @@ async function toggleGather(n: Note) {
 <template>
   <div class="community-page">
     <div class="page-head">
-      <h2>社区</h2>
-      <span class="head-count">问答与笔记都挂在具体课程下</span>
+      <h2>答疑广场</h2>
+      <span class="head-count">默认看全站；想只看某门课，在上面选课程</span>
     </div>
 
-    <!-- ★ 上下文选择器：不选就没有内容（后端列表接口强制要求归属） -->
+    <!-- ★ 上下文选择器（**可选**）：不选课程 = 全站广场（M10-1 第 3 期） -->
     <el-card v-loading="lessonsLoading" shadow="never" class="ctx-card">
       <div class="ctx-row">
         <span class="ctx-label">课程</span>
         <el-select
           v-model="selectedCourseId"
-          placeholder="选择课程"
+          placeholder="全部课程（广场）"
+          clearable
           style="width: 260px"
           data-testid="ctx-course"
         >
+          <!-- ★ 第 3 期新增：选中它 = 不带 courseId = 看全站广场 -->
+          <el-option label="全部课程（广场）" value="" />
           <el-option
             v-for="l in myLessons"
             :key="l.courseId"
@@ -454,156 +505,181 @@ async function toggleGather(n: Note) {
           <el-option v-for="s in allSections" :key="s.id" :label="s.name" :value="s.id" />
         </el-select>
 
-        <span class="ctx-tip">（不选动作 = 看整门课的内容）</span>
+        <span v-if="hasContext" class="ctx-tip">（不选动作 = 看整门课的内容）</span>
+        <span v-else class="ctx-tip">（没选课程 = 正在看全站广场，跨课程的所有提问）</span>
       </div>
     </el-card>
 
-    <el-empty v-if="!lessonsLoading && !myLessons.length" description="你还没有报名任何课程">
-      <el-button type="primary" @click="router.push('/courses')">去挑课程</el-button>
-    </el-empty>
+    <!--
+      ★ M10-1 第 3 期：**去掉了"没报名课程就整页遮住"的那层判断**。
+        原写法是 `<el-empty v-if="!myLessons.length">…你还没有报名任何课程…` + `<template v-else>`，
+        后果是没报名任何课程的人进来只看到空白页 —— 直接劝退。
+        广场模式下这里**永远有内容可看**（全站的提问），不该被遮。
 
-    <template v-else>
-      <el-tabs v-model="activeTab" class="main-tabs">
-        <el-tab-pane label="问答" name="qa">
-          <div class="toolbar">
-            <div class="toolbar-left">
-              <el-switch v-model="onlyMineQ" active-text="只看我提问的" @change="loadQuestions" />
-              <span class="total-tip" data-testid="question-total">共 {{ questionTotal }} 个问题</span>
-            </div>
-            <el-button
-              type="primary"
-              :icon="Plus"
-              :disabled="!selectedCourseId"
-              data-testid="question-ask-btn"
-              @click="openAskDialog"
-            >
-              我要提问
-            </el-button>
+      ⚠️ 我第一版是把 `<template v-else>` 改成**裸 `<template>`**（以为"无条件 = 不产生 DOM"）——
+         **那是错的**：Vue 里裸 `<template>` 会被当成**原生 HTML template 元素**，
+         内容进 `content` 片段后**根本不渲染**（表现为整块 DOM 高宽为 0、点不动）。
+         Vue 只对带 `v-if` / `v-for` / `#slot` 的 `<template>` 做"不产生 DOM"的处理。
+         → 正确做法就是**把标签删掉**，让这些节点直接成为 `.community-page` 的子元素。
+    -->
+    <el-tabs v-model="activeTab" class="main-tabs">
+      <el-tab-pane label="问答" name="qa">
+        <!-- ★ 广场页签：待回答 / 最新 / 最热 / 我的 -->
+        <!--   「待回答」= answer_times = 0，既是真人的贡献入口，也是将来 AI 机器人的唯一作业区 -->
+        <el-radio-group v-model="qFeed" class="feed-tabs" data-testid="q-feed">
+          <el-radio-button value="unanswered">待回答</el-radio-button>
+          <el-radio-button value="new">最新</el-radio-button>
+          <el-radio-button value="hot">最热</el-radio-button>
+          <el-radio-button value="mine">我的</el-radio-button>
+        </el-radio-group>
+
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <!-- ★ 原来的「只看我提问的」开关已删 —— 它和上面的「我的」页签是同一件事，
+                 两个入口并存会让人以为它们有区别 -->
+            <span class="total-tip" data-testid="question-total">共 {{ questionTotal }} 个问题</span>
           </div>
-
-          <el-empty
-            v-if="!questions.length && !loading"
-            description="这门课下还没有人提问"
-            data-testid="question-empty"
-          />
-
-          <el-card
-            v-for="q in questions"
-            :key="q.id"
-            shadow="never"
-            class="item-card"
-            data-testid="question-item"
+          <el-button
+            type="primary"
+            :icon="Plus"
+            :disabled="!selectedCourseId"
+            data-testid="question-ask-btn"
+            @click="openAskDialog"
           >
-            <div class="item-head" @click="router.push(`/community/question/${q.id}`)">
-              <span class="item-title">{{ q.title }}</span>
-              <el-tag v-if="q.anonymity" type="info" size="small">匿名</el-tag>
-            </div>
-            <div v-if="q.description" class="item-desc" @click="router.push(`/community/question/${q.id}`)">
-              {{ q.description }}
-            </div>
-            <div v-if="q.latestReplyContent" class="item-latest">
-              最新回答：{{ q.latestReplyContent }}
-              <span v-if="q.latestReplyUser" class="latest-user">—— {{ q.latestReplyUser }}</span>
-            </div>
-            <div class="item-foot">
-              <span class="foot-left">
-                <el-icon><ChatDotRound /></el-icon>
-                <span data-testid="question-answer-times">{{ q.answerTimes ?? 0 }} 个回答</span>
-                <span class="dot">·</span>
-                <span>{{ q.userName || '匿名用户' }}</span>
-                <span class="dot">·</span>
-                <span>{{ formatDateTime(q.createTime) }}</span>
-              </span>
-              <el-button link type="danger" :icon="Delete" size="small" @click.stop="removeQuestion(q)">
-                删除
-              </el-button>
-            </div>
-          </el-card>
+            我要提问
+          </el-button>
+        </div>
 
-          <el-pagination
-            v-if="questionTotal > qPageSize"
-            v-model:current-page="qPageNo"
-            class="pager"
-            layout="prev, pager, next"
-            :page-size="qPageSize"
-            :total="questionTotal"
-            @current-change="loadQuestions"
-          />
-        </el-tab-pane>
+        <el-empty
+          v-if="!questions.length && !loading"
+          :description="
+            qFeed === 'unanswered'
+              ? '暂时没有待回答的问题 —— 你的回答会很有用'
+              : qFeed === 'mine'
+                ? '你在这个范围里还没提过问题'
+                : hasContext
+                  ? '这门课下还没有人提问'
+                  : '广场上还没有人提问，你可以问第一个'
+          "
+          data-testid="question-empty"
+        />
 
-        <el-tab-pane label="笔记" name="note">
-          <div class="toolbar">
-            <div class="toolbar-left">
-              <el-switch v-model="onlyMineN" active-text="只看我的" @change="loadNotes" />
-              <span class="total-tip" data-testid="note-total">共 {{ noteTotal }} 条笔记</span>
-            </div>
-            <el-button
-              type="primary"
-              :icon="EditPen"
-              :disabled="!selectedCourseId"
-              data-testid="note-write-btn"
-              @click="openNoteDialog"
-            >
-              写笔记
+        <el-card
+          v-for="q in questions"
+          :key="q.id"
+          shadow="never"
+          class="item-card"
+          data-testid="question-item"
+        >
+          <div class="item-head" @click="router.push(`/community/question/${q.id}`)">
+            <span class="item-title">{{ q.title }}</span>
+            <el-tag v-if="q.anonymity" type="info" size="small">匿名</el-tag>
+          </div>
+          <div v-if="q.description" class="item-desc" @click="router.push(`/community/question/${q.id}`)">
+            {{ q.description }}
+          </div>
+          <div v-if="q.latestReplyContent" class="item-latest">
+            最新回答：{{ q.latestReplyContent }}
+            <span v-if="q.latestReplyUser" class="latest-user">—— {{ q.latestReplyUser }}</span>
+          </div>
+          <div class="item-foot">
+            <span class="foot-left">
+              <el-icon><ChatDotRound /></el-icon>
+              <span data-testid="question-answer-times">{{ q.answerTimes ?? 0 }} 个回答</span>
+              <span class="dot">·</span>
+              <span>{{ q.userName || '匿名用户' }}</span>
+              <span class="dot">·</span>
+              <span>{{ formatDateTime(q.createTime) }}</span>
+            </span>
+            <el-button link type="danger" :icon="Delete" size="small" @click.stop="removeQuestion(q)">
+              删除
             </el-button>
           </div>
+        </el-card>
 
-          <el-empty v-if="!notes.length && !loading" description="这门课下还没有笔记" data-testid="note-empty" />
+        <el-pagination
+          v-if="questionTotal > qPageSize"
+          v-model:current-page="qPageNo"
+          class="pager"
+          layout="prev, pager, next"
+          :page-size="qPageSize"
+          :total="questionTotal"
+          @current-change="loadQuestions"
+        />
+      </el-tab-pane>
 
-          <el-card v-for="n in notes" :key="n.id" shadow="never" class="item-card" data-testid="note-item">
-            <div class="note-head">
-              <el-avatar :size="24" :src="n.authorIcon ?? undefined">
-                {{ (n.authorName || '?').slice(0, 1) }}
-              </el-avatar>
-              <span class="note-author">{{ n.authorName || '未知' }}</span>
-              <el-tag v-if="n.isGathered" type="warning" size="small">采集</el-tag>
-              <el-tag v-if="n.isPrivate" type="info" size="small">私密</el-tag>
-              <span v-if="n.noteMoment" class="note-moment">视频 {{ formatDuration(n.noteMoment) }} 处</span>
-              <span class="note-time">{{ formatDateTime(n.createTime) }}</span>
-            </div>
+      <el-tab-pane label="笔记" name="note">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <el-switch v-model="onlyMineN" active-text="只看我的" @change="loadNotes" />
+            <span class="total-tip" data-testid="note-total">共 {{ noteTotal }} 条笔记</span>
+          </div>
+          <el-button
+            type="primary"
+            :icon="EditPen"
+            :disabled="!selectedCourseId"
+            data-testid="note-write-btn"
+            @click="openNoteDialog"
+          >
+            写笔记
+          </el-button>
+        </div>
 
-            <div class="item-desc">{{ n.content }}</div>
+        <el-empty v-if="!notes.length && !loading" description="这门课下还没有笔记" data-testid="note-empty" />
 
-            <div class="item-foot">
-              <span class="foot-left">
-                <el-button
-                  link
-                  :type="n.liked ? 'primary' : 'default'"
-                  size="small"
-                  data-testid="note-like-btn"
-                  @click="toggleNoteLike(n)"
-                >
-                  ♥ <span data-testid="note-like-times">{{ n.likedTimes ?? 0 }}</span>
-                </el-button>
-                <el-button
-                  link
-                  :icon="isGatheredCard(n) ? StarFilled : Star"
-                  :type="isGatheredCard(n) ? 'warning' : 'default'"
-                  size="small"
-                  data-testid="note-gather-btn"
-                  @click="toggleGather(n)"
-                >
-                  {{ gatherLabel(n) }}
-                </el-button>
-              </span>
-              <el-button link type="danger" :icon="Delete" size="small" @click="removeNote(n)">
-                删除
+        <el-card v-for="n in notes" :key="n.id" shadow="never" class="item-card" data-testid="note-item">
+          <div class="note-head">
+            <el-avatar :size="24" :src="n.authorIcon ?? undefined">
+              {{ (n.authorName || '?').slice(0, 1) }}
+            </el-avatar>
+            <span class="note-author">{{ n.authorName || '未知' }}</span>
+            <el-tag v-if="n.isGathered" type="warning" size="small">采集</el-tag>
+            <el-tag v-if="n.isPrivate" type="info" size="small">私密</el-tag>
+            <span v-if="n.noteMoment" class="note-moment">视频 {{ formatDuration(n.noteMoment) }} 处</span>
+            <span class="note-time">{{ formatDateTime(n.createTime) }}</span>
+          </div>
+
+          <div class="item-desc">{{ n.content }}</div>
+
+          <div class="item-foot">
+            <span class="foot-left">
+              <el-button
+                link
+                :type="n.liked ? 'primary' : 'default'"
+                size="small"
+                data-testid="note-like-btn"
+                @click="toggleNoteLike(n)"
+              >
+                ♥ <span data-testid="note-like-times">{{ n.likedTimes ?? 0 }}</span>
               </el-button>
-            </div>
-          </el-card>
+              <el-button
+                link
+                :icon="isGatheredCard(n) ? StarFilled : Star"
+                :type="isGatheredCard(n) ? 'warning' : 'default'"
+                size="small"
+                data-testid="note-gather-btn"
+                @click="toggleGather(n)"
+              >
+                {{ gatherLabel(n) }}
+              </el-button>
+            </span>
+            <el-button link type="danger" :icon="Delete" size="small" @click="removeNote(n)">
+              删除
+            </el-button>
+          </div>
+        </el-card>
 
-          <el-pagination
-            v-if="noteTotal > nPageSize"
-            v-model:current-page="nPageNo"
-            class="pager"
-            layout="prev, pager, next"
-            :page-size="nPageSize"
-            :total="noteTotal"
-            @current-change="loadNotes"
-          />
-        </el-tab-pane>
-      </el-tabs>
-    </template>
+        <el-pagination
+          v-if="noteTotal > nPageSize"
+          v-model:current-page="nPageNo"
+          class="pager"
+          layout="prev, pager, next"
+          :page-size="nPageSize"
+          :total="noteTotal"
+          @current-change="loadNotes"
+        />
+      </el-tab-pane>
+    </el-tabs>
 
     <!-- 提问弹窗：★ 必须选定「课程 > 训练日 > 动作」三级上下文 -->
     <el-dialog v-model="askVisible" title="我要提问" width="620px">
@@ -805,8 +881,12 @@ async function toggleGather(n: Note) {
   margin-bottom: 8px;
 }
 
-.toolbar {
-  display: flex;
+/* 广场页签（待回答 / 最新 / 最热 / 我的）：撑满一行，和下面的工具栏拉开一点 */
+.feed-tabs {
+  margin-bottom: 12px;
+}
+
+.toolbar {  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;

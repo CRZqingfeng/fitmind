@@ -38,6 +38,12 @@ public class KnowledgeIndexManager {
     /** 上一次构建的结果，供健康检查与验收读取 */
     private volatile KnowledgeStatus lastStatus;
 
+    /** 启动引导
+     * 三道闸门：
+     * <p>索引不存在 → 首次构建</p>
+     * <p>维度不一致 → 报警但不阻塞启动</p>
+     * <p>初始化失败 → 服务继续启动，检索返回空</p>
+     * */
     @PostConstruct
     public void bootstrap() {
         AigcProperties.Rag rag = props.getRag();
@@ -86,10 +92,11 @@ public class KnowledgeIndexManager {
         long start = System.currentTimeMillis();
         AigcProperties.Rag rag = props.getRag();
 
+        // ①加载语料入口
         MarkdownCorpusLoader loader = new MarkdownCorpusLoader(rag.getCorpusLocation());
         List<MarkdownCorpusLoader.CorpusDocument> corpus = loader.load();
+        // ②语义分块入口
         MarkdownChunker chunker = new MarkdownChunker(rag.getChunkSize(), rag.getChunkOverlap());
-
         List<Document> chunks = new ArrayList<>();
         for (MarkdownCorpusLoader.CorpusDocument doc : corpus) {
             chunks.addAll(chunker.split(doc));
@@ -98,6 +105,7 @@ public class KnowledgeIndexManager {
             throw new IllegalStateException("分块结果为空 —— 语料有内容但一块都没切出来，检查 chunk-size 配置");
         }
 
+        // 索引重建入口
         if (vectorStore.indexExists()) {
             vectorStore.dropIndex();
         }
@@ -106,6 +114,7 @@ public class KnowledgeIndexManager {
         // 也避免单个 bulk 请求体过大
         int batch = 50;
         for (int i = 0; i < chunks.size(); i += batch) {
+            // ③向量化核心
             vectorStore.add(chunks.subList(i, Math.min(chunks.size(), i + batch)));
         }
         vectorStore.refresh();

@@ -78,6 +78,7 @@ public class ChatServiceImpl implements IChatService {
     public Flux<ChatEventVO> stream(ChatRequestDTO dto) {
         Long userId = UserContext.getUser();
 
+        //① 限流
         // ★★ M6-6 限流：**在"取会话 + 落库提问"之前**做。
         //   位置很关键 —— 被限流拒绝的请求不该在库里留下一条提问：
         //   否则用户被限住时仍在刷自己的会话列表，而且列表里会出现一堆
@@ -86,10 +87,11 @@ public class ChatServiceImpl implements IChatService {
         if (quota.limited()) {
             log.info("★ 本轮被限流拒绝：userId={}, 原因={}, 今日 {}/{}",
                     userId, quota.reason(), quota.usedToday(), quota.limit());
-            return limitedReply(quota);
+            return limitedReply(quota, dto.getSessionId());
         }
 
         ChatTurn turn;
+        //② 准备上下文
         try {
             turn = prepare(dto, userId);
         } catch (Exception e) {
@@ -100,6 +102,7 @@ public class ChatServiceImpl implements IChatService {
             throw e;
         }
 
+        //③ ★★★编排
         // 编排策略：请求参数优先（演示与验收用），否则取配置默认值
         ChatType chatType = ChatType.parse(
                 StrUtil.isNotBlank(dto.getChatType()) ? dto.getChatType() : props.getChat().getType());
@@ -110,6 +113,7 @@ public class ChatServiceImpl implements IChatService {
         //    必须在 orchestrate() 内部就地兜住。
         OrchestrationResult orchestration = orchestrate(chatType, turn);
 
+        //④ 调用模型
         return orchestration.responses()
                 // ★ 超时必须有：模型服务抖动时可能长时间不吐字，而 SSE 连接会一直挂着占线程。
                 //   超时抛的是 java.util.concurrent.TimeoutException ——
@@ -284,19 +288,29 @@ public class ChatServiceImpl implements IChatService {
      * 用户也能看懂"为什么没回答、什么时候能再用" ——
      * 而"429 Too Many Requests"对用户来说是零信息量的。</p>
      */
-    private Flux<ChatEventVO> limitedReply(QuotaResult quota) {
+    private Flux<ChatEventVO> limitedReply(QuotaResult quota, String sessionId) {
         String message = AigcConstants.limitMessage(quota.reason(), quota.limit());
+        var payload = JSONUtil.createObj()
+                .set("limited", true)
+                .set("limitReason", quota.reason())
+                .set("quotaUsed", quota.usedToday())
+                .set("quotaLimit", quota.limit())
+                .set("quotaRemaining", quota.remaining())
+                .set("firstTokenMs", 0)
+                .set("totalMs", 0);
+        // ★ M6-8 #18：把会话 id 一起带回去（**不建会话、不落库**，只让它对得上号）。
+        //   在此之前，限流的 STOP 载荷里连 sessionId 都没有 —— 前端因此拿不到"这是哪一轮"，
+        //   左侧会话列表也不会出现这次交互，用户会觉得"我明明问过、系统还答了"，
+        //   但刷新后**查无此事**。
+        //   ★ 这里刻意**不**去 `getOrCreate` 建一个空会话：被限流的请求不落库是既定设计
+        //     （见上面 stream() 里那段注释），凭空多出一个空会话反而更乱。
+        //     所以做法是"**把话说清楚**"（文案见 AigcConstants.limitMessage）+ 让 id 对得上。
+        if (StrUtil.isNotBlank(sessionId)) {
+            payload.set("sessionId", sessionId);
+        }
         return Flux.just(
                 ChatEventVO.data(message),
-                ChatEventVO.stop().setData(JSONUtil.createObj()
-                        .set("limited", true)
-                        .set("limitReason", quota.reason())
-                        .set("quotaUsed", quota.usedToday())
-                        .set("quotaLimit", quota.limit())
-                        .set("quotaRemaining", quota.remaining())
-                        .set("firstTokenMs", 0)
-                        .set("totalMs", 0)
-                        .toString()));
+                ChatEventVO.stop().setData(payload.toString()));
     }
 
     @Override
@@ -423,6 +437,9 @@ public class ChatServiceImpl implements IChatService {
         }
 
         try {
+            // ★★★ 分派给编排器，并记录"这次是谁回答的"
+            //   ① ROUTE 策略下，会真的去调一次路由模型，所以这里会阻塞
+            //   ② 其他策略下，只是构造一个 Flux，不会阻塞
             OrchestrationResult result = orchestrator.dispatch(chatType, context);
             turn.agentLabel = result.label();
             // ★ 把编排动作的 token 开销也记进这一轮：ROUTE 策略的花费 = 路由 + 回答，

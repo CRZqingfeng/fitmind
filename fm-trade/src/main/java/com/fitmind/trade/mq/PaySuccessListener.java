@@ -62,8 +62,8 @@ public class PaySuccessListener {
         }
         Long orderId = Long.valueOf(message.getBizOrderNo());
 
-        // ★ 条件更新：只有"待支付 → 已支付"成功才继续。
-        //   重复投递 / 订单已被超时关闭时，这里返回 false。
+        // ★ ①条件更新：只有是"待支付 → 已支付"才返回 false。
+        //   ② 重复投递 / 订单已被超时关闭时，这里返回 false。
         boolean first = orderService.changeStatus(new TradeOrder()
                 .setId(orderId)
                 .setStatus(OrderStatus.PAYED.getValue())
@@ -72,12 +72,15 @@ public class PaySuccessListener {
                 .setPayOrderNo(message.getPayOrderNo()), OrderStatus.NO_PAY);
 
         if (!first) {
+            // 两种情况会到这：
+            // ① MQ 重复投递：状态已经是 PAYED → 返回 0
+            // ② 超时取消先一步执行了：状态变成了 CLOSED → 返回 0
             log.info("订单已是终态，支付成功消息被忽略（幂等）：orderId={}, payOrderNo={}",
                     orderId, message.getPayOrderNo());
             return;
         }
 
-        // 明细跟着改成已支付，并算出课程到期时间
+        // 明细跟着改成已支付，一个订单可以包含多门课程，并逐个算出各自课程到期时间
         List<TradeOrderDetail> details = orderDetailMapper.getByOrderId(orderId);
         LocalDateTime now = LocalDateTime.now();
         for (TradeOrderDetail d : details) {

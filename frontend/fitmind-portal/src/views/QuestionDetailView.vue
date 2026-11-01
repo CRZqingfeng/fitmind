@@ -7,9 +7,16 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { deleteQuestion, getQuestion, pageReplies, saveReply } from '@/api/social'
 import type { Question, Reply } from '@/types/social'
-import { LikeBizType, ReplyUserType } from '@/types/social'
+import { LikeBizType } from '@/types/social'
 import { formatDateTime, pageTotal } from '@/utils/format'
 import { toggleLikeWithRollback } from '@/utils/like'
+/**
+ * ★ M10-1 第 2 期：身份徽章改成从 `utils/reply` 引入（原名进来，模板不用动）。
+ * 抽出去的理由：播放页评论区要渲染同一份 `ReplyVO`，
+ * 两处各写一份的话，"加一种身份"就会漏改其中一处 ——
+ * 而漏改的表现是"同一个回答在两个页面上显示成不同身份"，很难被想到。
+ */
+import { replyUserLabel as userTypeLabel, replyUserTag as userTypeTag } from '@/utils/reply'
 
 /**
  * 问题详情（M7-5）
@@ -129,18 +136,6 @@ async function removeQuestion() {
   await deleteQuestion(questionId.value)
   ElMessage.success('已删除')
   router.push('/community')
-}
-
-function userTypeLabel(t: number | null | undefined): string {
-  if (t === ReplyUserType.ADMIN) return '管理员'
-  if (t === ReplyUserType.COACH) return '教练'
-  return '学员'
-}
-
-function userTypeTag(t: number | null | undefined): 'danger' | 'success' | 'info' {
-  if (t === ReplyUserType.ADMIN) return 'danger'
-  if (t === ReplyUserType.COACH) return 'success'
-  return 'info'
 }
 </script>
 

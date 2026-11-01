@@ -56,12 +56,15 @@ public class KnowledgeRetriever {
      */
     public List<Document> retrieve(String question, AgentContext.RetrievalOptions options, RagTrace trace) {
         AigcProperties.Rag rag = props.getRag();
+        // 1. 参数解析（请求级覆盖 + 配置级兜底）
+        //设计要点：请求级覆盖 + 配置级兜底。
         // 请求级覆盖：null 就用配置默认值（同一个三元表达式写了三遍，
         // 因为"覆盖"这件事必须是逐字段的 —— 只传 topK 时阈值仍要取默认值）
         String goal = options == null ? null : options.goal();
         int topK = options == null || options.topK() == null ? rag.getTopK() : Math.max(1, options.topK());
         double threshold = options == null || options.threshold() == null
                 ? rag.getSimilarityThreshold() : options.threshold();
+        // 2. 前置校验
         // 向量一路的召回条数跟着 topK 走：覆盖了 topK 却还按配置的 vectorTopK 召回，
         // 会让"topK=10"这种测试拿到少于 10 条的结果，看起来像检索没生效
         int vectorTopK = Math.max(topK, rag.getVectorTopK());
@@ -90,6 +93,7 @@ public class KnowledgeRetriever {
 
         long start = System.currentTimeMillis();
         try {
+            // 3. ★★★构建检索请求
             Filter.Expression filter = buildFilter(goal);
             SearchRequest request = SearchRequest.builder()
                     .query(question)
@@ -99,17 +103,19 @@ public class KnowledgeRetriever {
                     .similarityThreshold(threshold)
                     .filterExpression(filter)
                     .build();
+            //4. 双路召回
             List<Document> vectorHits = vectorStore.similaritySearch(request);
 
             List<Document> keywordHits = List.of();
             if (hybrid) {
                 keywordHits = vectorStore.keywordSearch(question, keywordTopK, filter);
             }
-
+            // 5. RRF 融合
             List<Document> fused = hybrid
                     ? ElasticsearchVectorStore.fuseByRrf(List.of(vectorHits, keywordHits), topK)
                     : vectorHits;
 
+            //6.成本护栏 + 轨迹记录
             List<Document> injected = truncate(fused, rag.getMaxContextChars());
             long cost = System.currentTimeMillis() - start;
             trace.record(toSources(injected), vectorHits.size() + keywordHits.size(), injected.size(),
@@ -123,6 +129,7 @@ public class KnowledgeRetriever {
                     injected.size(), trace.getContextChars(), cost);
             return injected;
         } catch (Exception e) {
+            //★降级
             // ★ 检索失败降级为"无知识的普通对话"，而不是让整轮对话 500。
             //   一个可选能力（检索）坏了，不该把主能力（对话）也带下去。
             trace.markFailed("检索失败：" + e.getMessage());

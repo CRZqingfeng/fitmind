@@ -77,6 +77,7 @@ public class KnowledgeRetrievalAdvisor implements BaseAdvisor {
         if (trace.isRetrieved()) {
             docs = trace.cachedDocs();
         } else {
+            // ④ 知识检索核心入口
             docs = retriever.retrieve(question, options, trace);
             trace.cacheDocs(docs);
         }

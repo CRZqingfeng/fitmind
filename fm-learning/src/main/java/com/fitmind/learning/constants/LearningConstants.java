@@ -42,6 +42,13 @@ public interface LearningConstants {
     /** 延迟任务 ZSet 的 key，member = {lessonId}:{sectionId}，score = 到期时间戳毫秒 */
     String RECORD_DELAY_KEY = "learning:record:delay";
 
+    /**
+     * 落库重试计数 key 前缀，实际 key = learning:record:retry:{lessonId}:{sectionId}。
+     *
+     * <p>落库失败要把任务放回 ZSet 重试，这个计数用来兜住"MySQL 长时间不可用"时的重试风暴。</p>
+     */
+    String RECORD_RETRY_KEY = "learning:record:retry:";
+
     // ==================== 积分榜分表 ====================
 
     /** 榜单逻辑表名（PO 上 @TableName 的值），动态表名拦截器据此做替换 */

@@ -122,6 +122,69 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/GrowthView.vue'),
         meta: { title: '成长' },
       },
+      // ==================== M11-2 计划模块（训练编排 / 执行）====================
+      // ★★ 注意与上面那条 `plans`（`/plans` → PlansView）区分：
+      //    那个是**课程学习计划**（某门课每周练几次），本模块是**训练编排**
+      //    （周一练胸：深蹲 4 组 × 8 次 + 组休 90 秒）。路径 /plan ≠ /plans，
+      //    一个字母之差，但语义、表、接口全不同，别互相跳转。
+      {
+        path: 'plan',
+        name: 'plan',
+        component: () => import('@/views/PlanHomeView.vue'),
+        meta: { title: '计划' },
+      },
+      {
+        path: 'plan/detail/:id',
+        name: 'plan-detail',
+        component: () => import('@/views/PlanDetailView.vue'),
+        meta: { title: '计划详情', hideInMenu: true },
+      },
+      {
+        path: 'plan/edit/:id',
+        name: 'plan-edit',
+        // `:id` 传 'new' 时由页面自己建一个新计划（见 PlanEditView 的注释）
+        component: () => import('@/views/PlanEditView.vue'),
+        meta: { title: '编排计划', hideInMenu: true },
+      },
+      {
+        path: 'plan/exercise-lib',
+        name: 'plan-exercise-lib',
+        component: () => import('@/views/ExerciseLibView.vue'),
+        meta: { title: '动作库', hideInMenu: true },
+      },
+      {
+        path: 'plan/exercise/:id',
+        name: 'plan-exercise',
+        component: () => import('@/views/ExerciseDetailView.vue'),
+        meta: { title: '动作详情', hideInMenu: true },
+      },
+      {
+        path: 'plan/workout/:sessionId',
+        name: 'plan-workout',
+        component: () => import('@/views/WorkoutView.vue'),
+        meta: { title: '训练中', hideInMenu: true },
+      },
+      // ==================== M11-3 饮食（P1）====================
+      // ★ 三个页面都从「计划 → 饮食」tab 里进，不占菜单（菜单仍是 10 项）
+      {
+        path: 'plan/food-lib',
+        name: 'plan-food-lib',
+        // 四个「记X餐」入口共用这一个页面，靠 query 的 mealType + date 区分
+        component: () => import('@/views/FoodLibView.vue'),
+        meta: { title: '饮食库', hideInMenu: true },
+      },
+      {
+        path: 'plan/sport-lib',
+        name: 'plan-sport-lib',
+        component: () => import('@/views/SportLibView.vue'),
+        meta: { title: '记运动', hideInMenu: true },
+      },
+      {
+        path: 'plan/diet-plan/:id',
+        name: 'plan-diet-plan',
+        component: () => import('@/views/DietPlanDetailView.vue'),
+        meta: { title: '饮食计划', hideInMenu: true },
+      },
       // ==================== M7-6 体测评估 ====================
       {
         path: 'assessment',

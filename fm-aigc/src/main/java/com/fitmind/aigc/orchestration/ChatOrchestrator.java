@@ -69,7 +69,7 @@ public class ChatOrchestrator {
     }
 
     /**
-     * 按策略分派。
+     * 按前端请求策略分派。
      *
      * @param chatType 本次使用的策略（配置默认值 + 请求级覆盖，由上层解析）
      */
@@ -142,6 +142,7 @@ public class ChatOrchestrator {
         if (!context.history().isEmpty()) {
             spec = spec.messages(context.history());
         }
+        // ★ 纯模型对话，不带 Agent 分派，不带检索，不带工具，只有一段人设提示词
         Flux<ChatResponse> responses = spec.user(context.question())
                 .stream()
                 .chatResponse();

@@ -13,6 +13,9 @@ import {
   reportLearningRecord,
 } from '@/api/learning'
 import { getPlayUrl } from '@/api/media'
+import NoteComposer from '@/components/learn/NoteComposer.vue'
+import NotePanel from '@/components/learn/NotePanel.vue'
+import QaPanel from '@/components/learn/QaPanel.vue'
 import type { CataVO } from '@/types/course'
 import type { LearningLesson, LearningProgress } from '@/types/learning'
 import { CataType } from '@/types/learning'
@@ -27,19 +30,35 @@ import { formatDuration } from '@/utils/format'
  * ★★ 这一页最关键的一个决定：**什么时候上报学习进度**
  * ============================================================
  *
- * 后端的行为是"**上报即完成**" —— 实测上报 `moment=60 / duration=120`（只看了一半），
- * 返回的学习记录里 `finished` 已经是 `true`。它不判断"看了百分之多少"。
+ * 后端对"是否练完"的判据是 **`moment × 2 >= duration`**（过半即完成），
+ * 阈值收在 `LearningConstants.FINISH_RATIO_DENOMINATOR`。
  *
- * 这意味着：**如果跟着 `timeupdate` 频繁上报，用户点开视频几秒，
- * 这个动作就被记成"练完了"** —— 进度条会骗人，而且这种"错误"看起来像功能正常。
+ * ★ 订正（2026-10-04）：本页原先写的是"后端上报即完成、不判断百分比"，
+ *   那是**误读**。当时用的验证用例是上报 `moment=60 / duration=120`，
+ *   而它恰好满足 `60 × 2 = 120 >= 120` —— **正压在半数阈值上**（`>=` 是闭区间，
+ *   一半本来就是"完成"的起点）。换个点测立刻就能看出后端在按百分比判断：
+ *   `moment=59 → 118 < 120 → finished=false`。
  *
- * 所以本页只在四个时机上报：
+ *   这个误读让本页一度**放弃了播放中的定时上报**，只保留 4 个边界时机 ——
+ *   而后端整套延迟合并机制本来就是按"播放中每 15 秒上报一次"推导的
+ *   （进度缓存 TTL 30s = 上报间隔 15s + 延迟落库 5s），
+ *   **没有高频上报，就没有"合并"可谈**。
+ *
+ * 所以本页现在分两层上报：
+ *
+ * 【A. 播放中】每 15 秒一次 —— `@play` 起定时器，`@pause` / `@ended` / 切动作 / 卸载时清掉。
+ *   这才是"进度合并"的输入源。带上 `skipReload` 避免产生多余的读请求。
+ *
+ * 【B. 边界时机】这些是**必须准确**的：
  *   ① 视频**暂停**（自然停顿，是"我看到这"的真实信号）
  *   ② **切换动作**前（先把上一个的断点存下来）
  *   ③ **离开页面**前（路由切换时补一次）
  *   ④ 用户点**「标记完成」**（明确表达"练完了"，这时才用 moment = duration）
  *
- * 代价是"看到一半直接关标签页"可能丢几秒断点 —— 这个代价远小于"进度都是假的"。
+ * ★ 为什么"频繁上报"是安全的：完成与否只取决于 `moment` 本身，**与上报频率无关** ——
+ *   用户把进度条拖到 60% 再暂停，同样会被判完成。那是**规则**（过半即完成），不是 bug。
+ *   反过来，定时上报还把原先的代价修掉了：以前"看到一半直接关标签页"会丢整段断点，
+ *   现在最多丢 15 秒。
  */
 const route = useRoute()
 const router = useRouter()
@@ -61,6 +80,44 @@ const videoFailed = ref(false)
 const reporting = ref(false)
 
 const videoRef = ref<HTMLVideoElement | null>(null)
+
+// ============================================================
+// M10-1 第 1 期：笔记（边看边记）
+// ============================================================
+
+/**
+ * 当前播放秒数 —— 笔记时间戳的来源。
+ *
+ * ★ 只在**整秒变化**时才写这个 ref。`timeupdate` 每秒触发约 4 次，
+ *   每次都赋值会让本组件（含目录树、笔记列表）在播放时反复重渲染，肉眼可见地卡。
+ */
+const currentMoment = ref(0)
+
+/** 右侧栏页签 */
+const sideTab = ref<'catalog' | 'note'>('catalog')
+
+/** 记笔记成功后 +1 → 笔记面板 watch 它刷新（比拿 ref 调子组件方法松耦合） */
+const noteRefreshKey = ref(0)
+
+/**
+ * 当前动作所属的训练日 id。
+ *
+ * ★ `NoteFormDTO.chapterId` 是 `@NotNull`，而目录里 chapter 是 section 的**父级**
+ *   （`Catalogues` 是 Day → sections 两层），所以这里要反查。
+ *   查不到就返回空串 → 提交按钮禁用（宁可不让点，也不要带着空 chapterId 去换一个 400）。
+ */
+const currentChapterId = computed(() => {
+  const sid = currentSection.value?.id
+  if (!sid) return ''
+  for (const day of catalogues.value) {
+    if (day.type !== CataType.DAY) continue
+    if ((day.sections ?? []).some((s) => s.id === sid)) return String(day.id)
+  }
+  return ''
+})
+
+/** 没选中动作、或反查不到训练日 → 不能记笔记 */
+const noteDisabled = computed(() => !currentSection.value?.id || !currentChapterId.value)
 
 /** 把所有动作摊平（带着所属训练日名），方便"上一个/下一个"和进度统计 */
 const flatSections = computed(() => {
@@ -111,13 +168,17 @@ onMounted(async () => {
 })
 
 /**
- * 离开页面前把当前断点补上一次。
+ * 离开页面前：停掉定时上报，再把当前断点补一次。
  *
  * ★ 用 `onBeforeUnmount`（SPA 路由切换会正常触发）而不是 `pagehide`：
  *   `pagehide` 时页面正在卸载，异步请求经常发不出去，反而给人一种"上报了"的错觉。
- *   这里如实说明：**直接关标签页可能丢最后几秒断点**，这个取舍是有意的。
+ *   `onBeforeUnmount` 是同步拦得住的，所以这里能发出去。
+ *
+ *   剩下"直接关标签页"这一种情况确实发不出去 —— 但现在**播放中的定时上报每 15 秒
+ *   就会把断点写进后端缓存**，所以最多丢 15 秒，而不是整段。
  */
 onBeforeUnmount(async () => {
+  stopProgressTimer()
   await reportNow({ silent: true })
 })
 
@@ -152,6 +213,9 @@ async function loadProgress() {
  * 顺序不能反 —— 反了就会把"新动作的 0 秒"记到旧动作头上。
  */
 async function selectSection(section: CataVO, opts: { skipReport?: boolean } = {}) {
+  // 换动作会换 <video> 的 src，旧定时器必须先停 —— 否则它会继续拿旧动作的播放姿态上报
+  stopProgressTimer()
+
   if (!opts.skipReport && currentSection.value && currentSection.value.id !== section.id) {
     await reportNow()
   }
@@ -159,6 +223,9 @@ async function selectSection(section: CataVO, opts: { skipReport?: boolean } = {
   currentSection.value = section
   playUrl.value = ''
   videoFailed.value = false
+  // ★ 换了动作 = 换了一条时间轴，旧的秒数必须清掉 ——
+  //   否则在新动作刚加载出来的那一瞬间记笔记，会把**上一个动作的秒数**写进去。
+  currentMoment.value = 0
 
   if (!section.mediaId) {
     // 目录里没绑视频（后端上架时是有校验的，这里是防御）
@@ -191,8 +258,14 @@ async function selectSection(section: CataVO, opts: { skipReport?: boolean } = {
  *
  * ★ `moment` 取播放器当前时间；如果视频还没加载出来就退回用记录里的断点，
  *   避免把 0 写进去（那等于"把断点清零"）。
+ *
+ * ★ `skipReload` 专给**播放中的定时上报**用：不回拉进度。
+ *   播放中用户不需要盯着打勾状态，而暂停 / 切动作 / 标记完成这三个时机都会回拉，
+ *   那里才是"看结果"的地方 —— 这样定时上报只产生 1 个 POST，不夹带多余的 GET。
  */
-async function reportNow(opts: { silent?: boolean; asFinished?: boolean } = {}) {
+async function reportNow(
+  opts: { silent?: boolean; asFinished?: boolean; skipReload?: boolean } = {},
+) {
   const section = currentSection.value
   const currentLesson = lesson.value
   if (!section || !currentLesson) return
@@ -214,7 +287,9 @@ async function reportNow(opts: { silent?: boolean; asFinished?: boolean } = {}) 
       moment,
       duration: duration || moment,
     })
-    await loadProgress()
+    if (!opts.skipReload) {
+      await loadProgress()
+    }
     if (!opts.silent) {
       ElMessage.success(opts.asFinished ? '已标记为完成' : '进度已保存')
     }
@@ -224,6 +299,58 @@ async function reportNow(opts: { silent?: boolean; asFinished?: boolean } = {}) 
   } finally {
     reporting.value = false
   }
+}
+
+// ============================================================
+// 播放中的定时上报（每 15 秒一次）
+// ------------------------------------------------------------
+// 这才是后端"延迟合并落库"的输入源：一段 40 分钟的视频 = 2400 ÷ 15 = 160 次上报，
+// 后端把它们合并成"停播后的 1 次写库"。
+// ============================================================
+
+/**
+ * 定时上报间隔（毫秒）。
+ *
+ * ★ 这个值不是随手拍的：后端的 `delay-seconds` 必须**大于**本间隔，合并才成立 ——
+ *   否则任务会在下一次上报之前就到期被消费，`ZADD` 变成"新建"而非"覆盖"，
+ *   每次上报都落库一次（实测：5s 时 8 次上报 → 8 次落库）。
+ *   当前 `delay-seconds: 20 > 15s` ✅，要改这里请同步看
+ *   `fm-learning/src/main/resources/application.yml`。
+ */
+const REPORT_INTERVAL_MS = 15_000
+
+/** 定时上报句柄（暂停 / 播完 / 切动作 / 卸载都要清掉，否则定时器会泄漏） */
+let progressTimer: ReturnType<typeof setInterval> | undefined
+
+/** 开始播放 → 起定时上报 */
+function startProgressTimer() {
+  stopProgressTimer() // 先清再起：重复的 play 事件不能叠出多个定时器
+  progressTimer = setInterval(() => {
+    // 上一拍还没回来就跳过这一拍。定时上报是"可丢的"（下一次 15 秒后还有），
+    // 绝不能让它和暂停上报叠在一起打同一个接口
+    if (reporting.value) return
+    void reportNow({ silent: true, skipReload: true })
+  }, REPORT_INTERVAL_MS)
+}
+
+/** 停止定时上报（幂等） */
+function stopProgressTimer() {
+  if (progressTimer !== undefined) {
+    clearInterval(progressTimer)
+    progressTimer = undefined
+  }
+}
+
+/** 暂停：停表 + 立刻补一次 —— 暂停是"我看到这"的真实信号，必须准确 */
+async function onVideoPause() {
+  stopProgressTimer()
+  await reportNow({ silent: true })
+}
+
+/** 播完：`ended` **不会**触发 `pause`，所以这里得自己停表，否则会一直空转上报 */
+async function onVideoEnded() {
+  stopProgressTimer()
+  await reportNow({ silent: true })
 }
 
 /** 点「标记完成」：用 moment = duration 明确表达"练完了" */
@@ -249,6 +376,44 @@ async function goNext() {
   } else {
     ElMessage.success('已经是最后一个动作了')
   }
+}
+
+// ============================================================
+// 笔记：时间戳同步 与 跳转（M10-1 第 1 期）
+// ============================================================
+
+/**
+ * 播放进度 → `currentMoment`。
+ *
+ * ★ 只在整秒变化时赋值：`timeupdate` 每秒约 4 次，无脑赋值会让整个播放页
+ *   （目录树 + 笔记列表）跟着重渲染 —— 表现是"播视频时页面一直在抖"。
+ */
+function onTimeUpdate() {
+  const video = videoRef.value
+  if (!video) return
+  const sec = Math.floor(video.currentTime)
+  if (sec !== currentMoment.value) currentMoment.value = sec
+}
+
+/**
+ * 点笔记的时间戳 → 跳到那一秒并继续播。
+ *
+ * ★ 这是整套笔记的价值所在：没有它，`note_moment` 只是一串没人看的数字。
+ *   （同一套"读秒 + 跳转"的写法，断点续播那里已经在用了 —— 见 `selectSection`）
+ */
+function seekTo(moment: number) {
+  const video = videoRef.value
+  if (!video) return
+  video.currentTime = moment
+  // 浏览器可能因自动播放策略拒绝 play()，静默忽略即可 ——
+  // 画面已经跳到目标位置了，那才是用户要的
+  void video.play().catch(() => undefined)
+}
+
+/** 记完笔记：刷新列表 + 切到笔记页签（让用户立刻看到刚写的那条） */
+function onNoteSaved() {
+  noteRefreshKey.value += 1
+  sideTab.value = 'note'
 }
 
 // ============================================================
@@ -404,52 +569,7 @@ function resetQuiz() {
     </el-result>
 
     <div v-else-if="lesson" class="learn-body">
-      <!-- 左：训练目录 -->
-      <el-card shadow="never" class="catalog-card">
-        <template #header>
-          <div class="catalog-header">
-            <span>训练目录</span>
-            <span class="catalog-tip">✓ 表示已有学习记录</span>
-          </div>
-        </template>
-
-        <el-empty v-if="!flatSections.length" description="这门课还没有训练动作" :image-size="60" />
-
-        <el-collapse v-else :model-value="catalogues.map((d) => d.id)" data-testid="learn-catalog">
-          <el-collapse-item v-for="day in catalogues" :key="day.id" :name="day.id">
-            <template #title>
-              <span class="day-title">
-                Day {{ day.index }} · {{ day.name }}
-                <span class="day-count">
-                  {{ (day.sections ?? []).filter((s) => isFinished(s.id)).length }}/{{ (day.sections ?? []).length }}
-                </span>
-              </span>
-            </template>
-
-            <div
-              v-for="sec in day.sections ?? []"
-              :key="sec.id"
-              class="section-item"
-              :class="{ 'is-current': isCurrent(sec.id), 'is-done': isFinished(sec.id) }"
-              data-testid="learn-section"
-              @click="selectSection(sec)"
-            >
-              <span class="section-status">
-                <el-icon v-if="isFinished(sec.id)" class="done-icon"><Check /></el-icon>
-                <span v-else class="section-dot">{{ sec.index }}</span>
-              </span>
-              <span class="section-name">{{ sec.name }}</span>
-              <!-- ★ 有题目的动作在目录里就能看见（不用点进去才知道） -->
-              <el-tag v-if="sec.subjectNum" class="quiz-badge" size="small" type="warning" effect="plain">
-                {{ sec.subjectNum }} 题
-              </el-tag>
-              <span class="section-duration">{{ formatDuration(sec.mediaDuration) }}</span>
-            </div>
-          </el-collapse-item>
-        </el-collapse>
-      </el-card>
-
-      <!-- 右：播放器 + 动作参数 -->
+      <!-- ★ M10-1：播放器回到左侧（原布局是"目录在左、播放器被挤在右"） -->
       <div class="player-col">
         <el-card shadow="never" class="player-card">
           <div v-if="currentSection" class="section-head">
@@ -479,7 +599,10 @@ function resetQuiz() {
               controls
               playsinline
               data-testid="learn-video"
-              @pause="reportNow({ silent: true })"
+              @play="startProgressTimer"
+              @timeupdate="onTimeUpdate"
+              @pause="onVideoPause"
+              @ended="onVideoEnded"
             />
             <el-empty
               v-else
@@ -509,10 +632,22 @@ function resetQuiz() {
             </el-button>
           </div>
 
+          <!-- ★ M10-1：快捷笔记条 —— 边看边记，不用离开播放器 -->
+          <NoteComposer
+            v-if="currentSection"
+            class="player-note"
+            :course-id="courseId"
+            :chapter-id="currentChapterId"
+            :section-id="currentSection.id"
+            :moment="currentMoment"
+            :disabled="noteDisabled"
+            @saved="onNoteSaved"
+          />
+
           <el-alert class="timing-tip" type="info" :closable="false" show-icon>
             <template #title>
-              进度在<b>暂停、切换动作、离开页面</b>时上报，点「标记完成」才会记为已完成。
-              <br />（后端按"是否上报过"判定完成，所以不能边播边报 —— 否则点开几秒就算练完了。）
+              进度在<b>播放中每 15 秒</b>自动上报，暂停 / 切换动作 / 离开页面时也会补一次。
+              完成与否由后端按<b>播放过半</b>判定（与上报频率无关）；点「标记完成」则直接记为已完成。
             </template>
           </el-alert>
         </el-card>
@@ -552,7 +687,97 @@ function resetQuiz() {
             </template>
           </el-alert>
         </el-card>
+
+        <!-- ★ M10-1 第 2 期：问答讨论区（B 站式评论区） -->
+        <!--
+          ⚠️ 位置是**在"动作参数"之后**，不是紧跟播放器。
+          方案 §三 的线框图原先把评论区画在播放器正下方，实做时改到了这里，原因：
+            ① "动作参数"（组数/次数/负重）是**看视频时要随时参考**的，把它挤到评论区
+               后面就得滚动才能看，反而更别扭；
+            ② 参数卡片里挂着**小测入口**（`learn-open-quiz`），而 m7-6 的验收脚本要
+               点它 —— 一旦把这张卡片折叠或挪到很靠下的位置，那条断言就有变红的风险。
+          评论区要"看完这一段、想说点什么"时才用，放在参数之后正合动线。
+        -->
+        <el-card v-if="currentSection" shadow="never" class="qa-card">
+          <template #header>
+            <span>问答讨论区</span>
+          </template>
+          <QaPanel
+            :course-id="courseId"
+            :chapter-id="currentChapterId"
+            :section-id="currentSection.id"
+          />
+        </el-card>
       </div>
+
+      <!-- ★ M10-1：右侧栏 —— 目录 / 笔记 两个页签（原来整个目录卡片占着左侧） -->
+      <el-card shadow="never" class="side-card">
+        <el-tabs v-model="sideTab" class="side-tabs" data-testid="learn-side-tabs">
+          <el-tab-pane label="目录" name="catalog">
+            <p class="catalog-tip-line">✓ 表示已有学习记录</p>
+
+            <el-empty
+              v-if="!flatSections.length"
+              description="这门课还没有训练动作"
+              :image-size="60"
+            />
+
+            <el-collapse
+              v-else
+              :model-value="catalogues.map((d) => d.id)"
+              data-testid="learn-catalog"
+            >
+              <el-collapse-item v-for="day in catalogues" :key="day.id" :name="day.id">
+                <template #title>
+                  <span class="day-title">
+                    Day {{ day.index }} · {{ day.name }}
+                    <span class="day-count">
+                      {{ (day.sections ?? []).filter((s) => isFinished(s.id)).length }}/{{
+                        (day.sections ?? []).length
+                      }}
+                    </span>
+                  </span>
+                </template>
+
+                <div
+                  v-for="sec in day.sections ?? []"
+                  :key="sec.id"
+                  class="section-item"
+                  :class="{ 'is-current': isCurrent(sec.id), 'is-done': isFinished(sec.id) }"
+                  data-testid="learn-section"
+                  @click="selectSection(sec)"
+                >
+                  <span class="section-status">
+                    <el-icon v-if="isFinished(sec.id)" class="done-icon"><Check /></el-icon>
+                    <span v-else class="section-dot">{{ sec.index }}</span>
+                  </span>
+                  <span class="section-name">{{ sec.name }}</span>
+                  <!-- ★ 有题目的动作在目录里就能看见（不用点进去才知道） -->
+                  <el-tag
+                    v-if="sec.subjectNum"
+                    class="quiz-badge"
+                    size="small"
+                    type="warning"
+                    effect="plain"
+                  >
+                    {{ sec.subjectNum }} 题
+                  </el-tag>
+                  <span class="section-duration">{{ formatDuration(sec.mediaDuration) }}</span>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+          </el-tab-pane>
+
+          <el-tab-pane label="笔记" name="note">
+            <NotePanel
+              :course-id="courseId"
+              :section-id="currentSection?.id"
+              :refresh-key="noteRefreshKey"
+              @seek="seekTo"
+            />
+          </el-tab-pane>
+        </el-tabs>
+      </el-card>
     </div>
 
     <!-- ==================== 动作小测抽屉（M7-6） ==================== -->
@@ -768,7 +993,9 @@ function resetQuiz() {
 }
 
 .learn-page {
-  max-width: 1180px;
+  /* ★ M10-1：1180 → 1400。要让"播放器 + 380px 侧栏"都放得下，
+     再按 1180 会把视频压回原来的宽度，白改一场 */
+  max-width: 1400px;
   margin: 0 auto;
 }
 
@@ -786,17 +1013,33 @@ function resetQuiz() {
 
 .learn-body {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  /* ★ M10-1：原来是 `320px 1fr`（目录在左、播放器被挤在右）。
+     现在视频是主角，回到左侧；侧栏固定 380px 装"目录 / 笔记"。
+     `minmax(0, 1fr)` 而不是 `1fr`：不加 `minmax(0, …)` 时，
+     子元素里长内容（视频/目录里的长动作名）会把整列撑破。 */
+  grid-template-columns: minmax(0, 1fr) 380px;
   gap: 16px;
   align-items: start;
 }
 
-.catalog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-weight: 600;
+/* 右侧栏：卡片内边距收一点，页签本身有留白 */
+.side-card :deep(.el-card__body) {
+  padding: 8px 14px 14px;
+}
+
+.side-tabs :deep(.el-tabs__header) {
+  margin-bottom: 10px;
+}
+
+.catalog-tip-line {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+/* 快捷笔记条与"上一个 / 标记完成 / 下一个"之间留一口气 */
+.player-note {
+  margin-top: 14px;
 }
 
 .catalog-tip {

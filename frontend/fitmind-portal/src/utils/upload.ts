@@ -102,6 +102,16 @@ export function readVideoDuration(file: File): Promise<number> {
  *    OSS 模式必须用后端回传的值（V4 把 Content-Type 算进签名），MinIO 模式才自猜。
  *    调用点写的是 `sig.contentType || file.type || guessMime(file.name)`。
  */
+
+/** 从 URL 里取 host（解析失败就原样返回），只为了让报错能说清"打到哪" */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
+}
+
 export function putToMinio(
   url: string,
   file: File,
@@ -109,6 +119,9 @@ export function putToMinio(
   onProgress: (percent: number) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    // ★ 错误信息里带上目标 host —— 桶名配错 / CORS 没配 / 网络不通，
+    //   浏览器给的都是同一句"CORS 错误"或 404，只有把地址打出来才分得清。
+    const target = hostOf(url)
     const xhr = new XMLHttpRequest()
     xhr.open('PUT', url, true)
     // ★ 见文件头 ②
@@ -118,9 +131,9 @@ export function putToMinio(
     }
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve()
-      else reject(new Error(`直传失败：对象存储返回 HTTP ${xhr.status}`))
+      else reject(new Error(`直传失败：对象存储返回 HTTP ${xhr.status}（${target}）`))
     }
-    xhr.onerror = () => reject(new Error('直传失败（网络中断或对象存储不可达）'))
+    xhr.onerror = () => reject(new Error(`直传失败：${target} 不可达，或被跨域(CORS)拦截`))
     xhr.send(file)
   })
 }

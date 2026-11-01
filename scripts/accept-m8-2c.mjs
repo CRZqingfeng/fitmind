@@ -101,7 +101,7 @@ function sql(query) {
   const r = spawnSync(
     MYSQL,
     ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   )
   checkCmdResult('SQL', query, r)
   return (r.stdout || '').trim()
@@ -120,7 +120,7 @@ function redis(...args) {
   const r = spawnSync(
     'docker',
     ['exec', 'fm-redis', 'redis-cli', '-a', envGet('REDIS_PASSWORD'), '--no-auth-warning', ...args],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   )
   return (r.stdout || '').trim()
 }
@@ -657,7 +657,7 @@ async function main() {
     'docker',
     ['exec', 'fm-redis', 'redis-cli', '-a', envGet('REDIS_PASSWORD'), '--no-auth-warning',
       'ZADD', ORDER_DELAY_KEY, String(past), String(orderId)],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   )
   console.log(`     已把该订单的到期时间改到 60 秒前（ZADD 返回 ${(zadd.stdout || '').trim()}）`)
 

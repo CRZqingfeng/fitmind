@@ -89,7 +89,7 @@ function checkCmdResult(kind, cmd, r) {
 function sql(query) {
   const r = spawnSync(MYSQL,
     ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query],
-    { encoding: 'utf8' });
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   checkCmdResult('SQL', query, r);
   return (r.stdout || '').trim();
 }
@@ -104,7 +104,7 @@ function sql(query) {
 function sqlSoft(query) {
   spawnSync(MYSQL,
     ['--default-character-set=utf8mb4', '-h127.0.0.1', '-P3306', '-uroot', '-p1234', '-N', '-e', query],
-    { encoding: 'utf8' });
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 /** 多行结果转成一行（Windows MySQL CLI 输出 CRLF，必须用 \r?\n） */
@@ -133,7 +133,7 @@ function envGet(key) {
 function redis(...args) {
   const r = spawnSync('docker',
     ['exec', 'fm-redis', 'redis-cli', '-a', envGet('REDIS_PASSWORD'), '--no-auth-warning', ...args],
-    { encoding: 'utf8' });
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   checkCmdResult('REDIS', `redis-cli ${args.join(' ')}`, r);
   return (r.stdout || '').trim();
 }
@@ -403,6 +403,9 @@ const SESSIONS_API = '/ais/chat/sessions';
 const MOCK_SNAPSHOT_KEY = 'aigc:mock:prompts';
 /** 同上，M6-4 用例里用的名字（两处都指向快照 key，避免改一处漏一处） */
 const MOCK_PROMPT_SNAPSHOT_KEY = MOCK_SNAPSHOT_KEY;
+/** ★ M6-8 第 2 期新增：工具定义快照（名字 + 描述）。本脚本只负责**清理**它，
+ *  断言在 `accept-m6-8.mjs` 里（那是"工具契约"这个主题的主场）。 */
+const MOCK_TOOLS_SNAPSHOT_KEY = 'aigc:mock:tools';
 
 /** 解析 SSE 响应体（Spring SseEmitter 输出的 event:/data: 块） */
 function parseSse(text) {
@@ -462,6 +465,7 @@ function aiCleanup() {
     if (sql(s) !== null || true) ok++;
   }
   redis('DEL', MOCK_SNAPSHOT_KEY);
+  redis('DEL', MOCK_TOOLS_SNAPSHOT_KEY);
   return ok;
 }
 
@@ -1001,6 +1005,14 @@ async function main() {
   //   「草稿表 + 正式表」两段式，baseInfo/save 只写 course_draft，
   //   **正式表 course 要到上架才写**。只建草稿的话工具会（正确地）说"没找到"。
   const COURSE_NAME = `M6-4哑铃全身训练${SUFFIX}`;
+  // ★ 建课**之前**记下"库里已经存在的 M6-4 媒资" —— 清理时**只删本次新增的**。
+  //   为什么不一刀切 `DELETE ... WHERE filename LIKE 'M6-4%'`：
+  //   库里躺着 19 条**历次跑动**留下的同前缀媒资（它们早已计入数据基线），
+  //   一刀切会"顺手清历史"→ 基线数字突变 → 以后分不清"新残留"和"旧欠债"。
+  //   ★ 这也符合铁律：**「删」要先确认"这东西是谁的"** —— 本次产生的才归本次清。
+  const mediaIdsBefore = new Set(
+    sql(`SELECT id FROM fm_media.media WHERE filename LIKE 'M6-4%'`)
+      .split(/\r?\n/).map((x) => x.trim()).filter(Boolean));
   const m64Course = await buildCourse({
     token: coachToken, name: COURSE_NAME, suffix: SUFFIX, free: 2, price: 19900,
   });
@@ -1027,9 +1039,20 @@ async function main() {
   check('含「推荐」的问题被路由到推荐 Agent', bodyAns?.agentType === 'recommend', `agent=${bodyAns?.agentType}`);
   check('★★ 模型调用了「查我的体测档案」工具（工具真的被执行了，不是只说要调）',
     (bodyAns?.toolNames || []).includes('queryMyBodyProfile'), `tools=${bodyAns?.toolNames}`);
-  check('★★ 工具读到的是当前用户自己的档案（M5 体测数据 → M6 的 AI 上下文）',
-    /182/.test(bodyAns?.content || '') && /70/.test(bodyAns?.content || '') && /增肌/.test(bodyAns?.content || ''),
-    `回答=${String(bodyAns?.content || '').slice(0, 90)}`);
+  // ★ 从**库里读当前值**再比对，不写死数字。
+  //   ⚠️ 原来写的是 `/182/.test && /70/.test` —— 而该账号的体重早已从 70 变成 65.5，
+  //   于是这条断言**长期假红**（看起来像"工具坏了"，其实数据是对的、断言是旧的）。
+  //   ★ 顺带按项目铁律补一条前置：**"对照值"本身必须先证明存在** ——
+  //   否则表里没行时拿到的空串能让 `includes('')` 永远成立（假通过）。
+  const profileRow = sql(`SELECT CONCAT(height, '|', weight) FROM fm_user.user_body_profile
+    WHERE user_id=${STUDENT_USER_ID} ORDER BY id DESC LIMIT 1`);
+  const [pHeight, pWeight] = profileRow.split('|');
+  check('★ 前置：当前用户确实有体测档案（否则下面的对照没有意义）',
+    !!pHeight && !!pWeight, profileRow || '（档案表没有该用户的行）');
+  const bodyText = String(bodyAns?.content || '');
+  check('★★ 工具读到的是当前用户自己的档案（M5 体测数据 → M6 的 AI 上下文），且数值与库里一致',
+    bodyText.includes(pHeight) && bodyText.includes(pWeight),
+    `库里 ${pHeight}cm / ${pWeight}kg，回答=${bodyText.slice(0, 110)}`);
   check('★★ 工具调用参数里根本没有 userId（模型就算编一个 id 也没有地方放）',
     (() => {
       const inv = (bodyAns?.toolCalls?.invocations || []).find((x) => x.name === 'queryMyBodyProfile');
@@ -1075,24 +1098,105 @@ async function main() {
   // ★★ 金额核对：拿"交易服务自己算的结果"来对，而不是拿一张我们以为存在的表。
   //   （原本打算查 trade_order 表，实测发现：**prePlace 不落库**，
   //     它只算钱 + 生成一个订单 id 并返回预览，真正的落库在 POST /orders。）
-  const selfPre = await call('GET', `/ts/orders/prePlace?courseIds=${m64Course?.courseId}`, { token });
-  check('★★ 工具返回的金额 == 交易服务自己算出来的金额（价格来自库里当前值，模型决定不了钱）',
-    Number(selfPre.json?.data?.realAmount) === Number(orderCard?.realAmount),
-    `交易服务=${selfPre.json?.data?.realAmount} / 工具=${orderCard?.realAmount}`);
+  // ★★ M6-8 #1 之后，这里**不能再"再调一次 prePlace 来自我核对金额"**：
+  //   AI 刚刚真的落了库，同一门课此刻正挂着"待支付订单" →
+  //   再 prePlace 必然被拒（`ORDER_COURSE_HAS_PENDING`），根本拿不到金额。
+  //   （这条断言原本就是这么写的，M6-8 一落库它必然红 —— 属于"改动的合理连带"。）
+  //
+  //   改成用**这次被拒**本身当证据：它反过来证明**那笔单真的在库里**，
+  //   并且"一门课不能有两笔待支付单"这条约束**对 AI 同样生效**（AI 没有豁免权）。
+  const dupPre = await call('GET', `/ts/orders/prePlace?courseIds=${m64Course?.courseId}`, { token });
+  check('★★ 同一门课再次 prePlace 被拒（"有一笔待支付的订单"）—— 反证 AI 那笔单已真实落库',
+    /待支付/.test(dupPre.json?.msg || ''),
+    `code=${dupPre.json?.code} msg=${dupPre.json?.msg}`);
   const coursePrice = sql(`SELECT price FROM fm_course.course WHERE id=${m64Course?.courseId}`);
   check('★ 金额与课程库里的价格一致（工具只传了课程 id，没有任何价格参数）',
     String(orderCard?.realAmount) === String(coursePrice), `课程价=${coursePrice} / 工具=${orderCard?.realAmount}`);
 
-  // ★★ 这一条比"落了待支付单"更有说服力：AI **连一条脏数据都产生不了**。
-  //   "算钱不落库"是 M4-1 的既有设计，AI 复用它的好处在这里体现出来 ——
-  //   真正的下单要用户在页面上自己点（带 orderId 提交），AI 没有那条通道。
+  // ---- ★★★ M6-8 #1：AI 承诺的订单必须**真的存在** ----
+  //
+  //   ⚠️ 本段**推翻**了 M6-4 时期这里的一条断言（原文是
+  //   "AI 调了预下单，但一笔订单都没有落库（它只能算价，不能替用户下单）"）。
+  //   那条断言的**前提本身就是错的**：当时 fm-aigc 只声明了 `prePlace`
+  //   （只算价、不落库），于是验收把"AI 没能下单"当成了"AI 不该下单"。
+  //   真实后果是：用户拿着卡片去支付页，发现这个订单号在系统里根本不存在。
+  //
+  //   ★ 真正的边界不是「AI 不能下单」，而是「**AI 能下单，但不能替用户付钱**」。
+  //   所以断言也从"没有落库"改成两条：**有落库** + **状态仍是待支付**。
+  //   （被推翻的结论要从旧文档里清掉 —— 验收脚本也是"文档"。）
+  const placedRow = sql(`SELECT CONCAT(id, '|', status, '|', real_amount, '|', user_id)
+    FROM fm_trade.trade_order WHERE id=${orderCard?.orderId || 0}`);
+  check('★★★ 卡片上的订单号在交易库里**真实存在**（AI 承诺的东西，系统里真的有）',
+    !!placedRow, placedRow || `orderId=${orderCard?.orderId} 在 trade_order 里查不到`);
+  const [pId, pStatus, pReal, pUser] = placedRow.split('|');
+  check('★★ 订单归属当前登录用户（身份来自请求上下文，不是模型"说"的）',
+    String(pUser) === String(STUDENT_USER_ID), `订单 user_id=${pUser} / 登录用户=${STUDENT_USER_ID}`);
+  check('★★ 库里的金额 == 工具回给模型的金额（金额只有一个来源：交易服务）',
+    String(pReal) === String(orderCard?.realAmount), `库里=${pReal} / 卡片=${orderCard?.realAmount}`);
+  // ★ 这一条才是"AI 不替用户付钱"的**证据**（而不是"AI 没落库"）
+  check('★★ 订单状态是「待支付」——AI 会创建订单，但**不会**替用户完成支付',
+    String(pStatus) === '1', `status=${pStatus}（1=待支付，2=已支付）`);
+  const placedDetail = sql(`SELECT COUNT(*) FROM fm_trade.trade_order_detail
+    WHERE order_id=${orderCard?.orderId || 0}`);
+  check('★ 订单明细也落了库（支付后要靠它发课程权益，只有主单不够）',
+    placedDetail === '1', `明细 ${placedDetail} 条`);
   const orderCountAfterBuy = sql(`SELECT COUNT(*) FROM fm_trade.trade_order`);
-  check('★★ AI 调了预下单，但一笔订单都没有落库（它只能算价，不能替用户下单）',
-    orderCountBeforeBuy === orderCountAfterBuy,
+  check('★ 本轮只新增 1 条订单（用同一个 orderId 提交，重复调用不会产生第二笔）',
+    Number(orderCountAfterBuy) - Number(orderCountBeforeBuy) === 1,
     `调用前 ${orderCountBeforeBuy} 条 → 调用后 ${orderCountAfterBuy} 条`);
   check('★ 回答里明确指向"待确认/由用户支付"，不假装已付款',
-    /(待支付|确认|自行|无法代替|不能代替)/.test(buyAns?.content || ''),
+    /(待支付|确认|自行|无法代替|不能代替|自己)/.test(buyAns?.content || ''),
     `回答=${String(buyAns?.content || '').slice(0, 80)}`);
+
+  // ---- ★★★ M6-8 #1 · 判据 ②：AI 下的单**能真的被支付** ----
+  //
+  //   "订单在库里"还不够 —— 下单的终点是支付。
+  //   这一段的杀伤力在于：只要订单没落库，applyPay 这一步就会失败。
+  //   所以它**同时**验证了"订单存在"与"订单可用"。
+  //   ★ 直接复用 AI 刚创建的那张单，不另造数据 —— 走的正是用户真实的那条路。
+  const payApply = await call('POST', `/ts/orders/${orderCard?.orderId}/pay`, { token });
+  const payOrderNo = payApply.json?.data?.payOrderNo;
+  check('★★ AI 生成的订单能发起支付（不存在的订单在这一步就会失败）',
+    !!payOrderNo, JSON.stringify(payApply.json)?.slice(0, 140));
+  if (payOrderNo) {
+    // ★ mock 渠道是**真的走回调**的：签名 → 验签 → MQ → 改订单状态，不是前端直接改状态
+    await call('POST', `/ps/mock/pay/${payOrderNo}`, { token });
+    // 支付是"回调 → MQ → 改状态"的异步链路 → 轮询，不能点完就断言
+    const paidOk = await waitUntil(
+      () => sql(`SELECT status FROM fm_trade.trade_order WHERE id=${orderCard?.orderId}`) === '2',
+      20000, 800);
+    check('★★★ 支付后订单状态真的流转到「已支付」（AI 下的单是**可用**的，不只是存在）',
+      paidOk,
+      `status=${sql(`SELECT status FROM fm_trade.trade_order WHERE id=${orderCard?.orderId}`)}（期望 2）`);
+    // ★ 支付要发课程权益，否则"买了课但学不了"。
+    //   ⚠️ 发权益是**另一段 MQ**（fm-trade 发 `order.pay` → fm-learning 的 `OrderPayListener` 写课表），
+    //   比"订单状态变已支付"**还要晚一步** —— 所以这里必须**轮询**，不能查一次就判。
+    //   （第一版就是查一次 → 假红；`status` 已经变了、课表却还没写。）
+    const lessonOk = await waitUntil(
+      () => sql(`SELECT COUNT(*) FROM fm_learning.learning_lesson
+        WHERE user_id=${STUDENT_USER_ID} AND course_id=${m64Course?.courseId}`) !== '0',
+      20000, 800);
+    const lessonCount = sql(`SELECT COUNT(*) FROM fm_learning.learning_lesson
+      WHERE user_id=${STUDENT_USER_ID} AND course_id=${m64Course?.courseId}`);
+    check('★★ 支付后权益落到 learning_lesson（AI 下的单与用户自己下的单，走的是同一条发放链路）',
+      lessonOk, `learning_lesson ${lessonCount} 条`);
+  }
+
+  // ---- ★★ M6-8 #5：业务失败要**透传真实原因**（而不是"下单失败，请稍后再试"）----
+  //   上一步已经把 m64Course 付掉了 —— 于是它成了一门"已购课程"，
+  //   正好拿它当"失败原因透传"的探针（这是最高频的一种下单失败）。
+  //   ★ 它的正确回复不是"下单失败"，而是"你已经有这门课了，去我的课程学"。
+  const alreadyAns = (await call('POST', CHAT_API,
+    { body: { content: `帮我买课程 ${m64Course?.courseId}` }, token })).json?.data;
+  check('★★ 已购课程再下单 —— 回复里带**真实原因**（不再是没营养的"下单失败，请稍后再试"）',
+    /(已经买过|买过了|已购买|已拥有|已经有|已购)/.test(alreadyAns?.content || ''),
+    `回答=${String(alreadyAns?.content || '').slice(0, 110)}`);
+  check('★★ 工具轨迹里记下了真实失败原因（出问题时能在面板上看到，不是只有一句"失败"）',
+    (alreadyAns?.toolCalls?.invocations || []).some((i) => /买过/.test(`${i.error || ''}${i.result || ''}`)),
+    JSON.stringify((alreadyAns?.toolCalls?.invocations || []).map((x) => `${x.name}:${x.error || x.result}`)).slice(0, 160));
+  check('★ 已购时**不再**回传待支付订单卡片（绝不给出一个假订单号）',
+    !(alreadyAns?.cards || []).some((c) => c.type === 'ORDER_CONFIRM'),
+    `卡片=${JSON.stringify((alreadyAns?.cards || []).map((c) => c.type))}`);
 
   // ---- ⑤ 模型编造课程 id：校验发生在副作用之前 ----
   const FAKE_ID = 99999999;
@@ -1363,6 +1467,37 @@ async function main() {
   })();
   const DAILY_HASH = `data:daily:${todayStr}`;
 
+  // ==================== ★★ 指标对账的基线（整个第 15 组共用）====================
+  // 为什么基线记在**这里**（第 15 组开头），而不是记在 ⑦ 段（"指标进数据中心"）那里：
+  //   本组的**降级用例**（限流降级 / 知识库故障注入）都在 ⑦ 段**之前**执行，
+  //   它们产生的 degraded 指标**当场就经 MQ 上报了**。
+  //   若等到 ⑦ 段再记基线，读到的是"已经含降级"的值 → **增量恒为 0 → 假红**
+  //   （2026-10-12 实测：`chat_degraded_count +0`，而同一轮的降级用例全都是 ✅）。
+  //   ★ 教训：**基线的位置要覆盖"所有会产生该指标的动作"，否则算出来的不是增量**。
+  const dbAssistant = () => Number(sql(
+    `SELECT COUNT(*) FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID} AND role='assistant'`));
+  const centerCount = () => Number(redis('HGET', DAILY_HASH, 'chat_count') || 0);
+  const centerTokens = () => Number(redis('HGET', DAILY_HASH, 'chat_tokens') || 0);
+  const centerFirstMs = () => Number(redis('HGET', DAILY_HASH, 'chat_first_ms_sum') || 0);
+  const centerDegraded = () => Number(redis('HGET', DAILY_HASH, 'chat_degraded_count') || 0);
+  const dbTokens = () => Number(sql(
+    `SELECT IFNULL(SUM(IFNULL(prompt_tokens,0)+IFNULL(completion_tokens,0)),0) FROM fm_aigc.chat_message
+     WHERE user_id=${STUDENT_USER_ID} AND role='assistant'`));
+
+  // ★ 先 flush 一次：让汇总表的基线 == Redis 的基线（否则"表基线"是上一次 flush 的旧值，
+  //   两边不同步，⑧ 段的增量就没法比）。顺序必须是 **先 flush、再读表**。
+  //   （★ 手动 flush 只做"Redis → 表"的搬运，**不删 Redis** —— 删是定时任务里另调的 clearCounter）
+  await call('POST', `/ds/admin/data/flush?date=${todayStr}`, { token: adminToken });
+  const baseCells = sqlCells(`SELECT chat_count, chat_tokens, chat_first_ms_sum, chat_degraded_count
+    FROM fm_data.data_daily WHERE stat_date=${todayStr}`);
+  const base = {
+    center: centerCount(), db: dbAssistant(),
+    tokens: centerTokens(), dbTokens: dbTokens(),
+    firstMs: centerFirstMs(), degraded: centerDegraded(),
+    tableTokens: Number(baseCells[1] ?? 0), tableFirstMs: Number(baseCells[2] ?? 0),
+    tableDegraded: Number(baseCells[3] ?? 0),
+  };
+
   /** 临时调额（管理端） */
   const setLimit = async (chats, tokens, conc = 2) =>
     (await call('POST', `${LIMIT_API}?dailyChats=${chats}&dailyTokens=${tokens}&maxConcurrent=${conc}`,
@@ -1497,31 +1632,35 @@ async function main() {
     failDenied.json?.code !== 200, `code=${failDenied.json?.code} msg=${failDenied.json?.msg}`);
 
   // ---- ⑦ ★★ 指标进数据中心（M5） ----
+  // ★★ 2026-10-12 起改用「增量口径」—— 原来这里是**绝对量**等式（数据中心 == 明细表），
+  //   但它其实**依赖全局环境状态**（违反 §四 第 7 条）：
+  //     `data:daily:{date}` 是**当日累加**的 Redis hash（MQ 一进来就 +1，只增不减），
+  //     而 `chat_message` 明细会被各验收脚本的清理段删掉（accept-m6 自己就删）。
+  //   于是只要**今天跑过别的脚本**（前端验收 / 手工清理），"中心 > 明细"就是必然的 →
+  //   等式断言 **假红**（2026-10-12 实测：数据中心 142 / 明细 133，差 9 轮全是
+  //   19:25 手工清会话时"删了明细、没回滚统计"留下的）。
+  //   ★ 增量基线在**第 15 组开头**就记好了（见上面那段，原因也写在那里）。
+  const legacy = base.center - base.db; // 环境遗留轮数（今天别的脚本留下的），只提示、不参与判定
+
   const statSid = `accept-m66-stat-${Date.now()}`;
   await call('POST', CHAT_API, { body: { content: '增肌期每天吃多少蛋白质', sessionId: statSid }, token });
   await call('POST', CHAT_API, { body: { content: '减脂期热量缺口开多大', sessionId: statSid }, token });
 
-  const dbAssistant = () => Number(sql(
-    `SELECT COUNT(*) FROM fm_aigc.chat_message WHERE user_id=${STUDENT_USER_ID} AND role='assistant'`));
-  const centerCount = () => Number(redis('HGET', DAILY_HASH, 'chat_count') || 0);
-  const counted = await waitUntil(() => centerCount() >= dbAssistant(), 15000);
+  const counted = await waitUntil(() => centerCount() - base.center >= dbAssistant() - base.db, 15000);
   check('★★ 每轮对话的指标经 MQ 进入数据中心（chat_count 在累加）',
-    counted && centerCount() > 0, `数据中心=${centerCount()} 待对账=${dbAssistant()}`);
-  check('★★ 全量对账：数据中心收到的轮数 == 明细表里的助手消息条数（防"统计说有、明细查不到"）',
-    centerCount() === dbAssistant(), `数据中心=${centerCount()} 明细=${dbAssistant()}`);
-
-  const centerTokens = Number(redis('HGET', DAILY_HASH, 'chat_tokens') || 0);
-  const dbTokens = Number(sql(
-    `SELECT IFNULL(SUM(IFNULL(prompt_tokens,0)+IFNULL(completion_tokens,0)),0) FROM fm_aigc.chat_message
-     WHERE user_id=${STUDENT_USER_ID} AND role='assistant'`));
-  check('★★ token 合计也对得上账（token 直接对应成本，是这一组里最重要的量）',
-    centerTokens === dbTokens, `数据中心=${centerTokens} 明细=${dbTokens}`);
+    counted && centerCount() - base.center > 0,
+    `数据中心 +${centerCount() - base.center} / 明细 +${dbAssistant() - base.db}`);
+  check('★★ 对账：本次产生的每一轮，都同时进了「数据中心」与「明细表」（防"统计说有、明细查不到"）',
+    centerCount() - base.center === dbAssistant() - base.db,
+    `数据中心 +${centerCount() - base.center} 明细 +${dbAssistant() - base.db}`
+    + (legacy > 0 ? `；环境遗留 ${legacy} 轮（今天别的脚本留下的，不计入本次）` : ''));
+  check('★★ token 增量也对得上账（token 直接对应成本，是这一组里最重要的量）',
+    centerTokens() - base.tokens === dbTokens() - base.dbTokens,
+    `数据中心 +${centerTokens() - base.tokens} 明细 +${dbTokens() - base.dbTokens}`);
   check('★ 首字延迟（AI 体验的核心指标）也进了数据中心',
-    Number(redis('HGET', DAILY_HASH, 'chat_first_ms_sum') || 0) > 0,
-    `chat_first_ms_sum=${redis('HGET', DAILY_HASH, 'chat_first_ms_sum')}`);
+    centerFirstMs() - base.firstMs > 0, `chat_first_ms_sum +${centerFirstMs() - base.firstMs}`);
   check('★ 降级次数被单独统计（AI 服务健康度，与"用了多少"是两个问题）',
-    Number(redis('HGET', DAILY_HASH, 'chat_degraded_count') || 0) >= 1,
-    `chat_degraded_count=${redis('HGET', DAILY_HASH, 'chat_degraded_count')}`);
+    centerDegraded() - base.degraded >= 1, `chat_degraded_count +${centerDegraded() - base.degraded}`);
 
   // ---- ⑧ 日汇总：Redis 计数 → data_daily ----
   const flushRes = await call('POST', `/ds/admin/data/flush?date=${todayStr}`, { token: adminToken });
@@ -1534,12 +1673,14 @@ async function main() {
     cells.length === 4 && Number(dChat) > 0, `row=${JSON.stringify(cells)}`);
   check('★★ data_daily 的 chat_count 与数据中心计数一致', Number(dChat) === centerCount(),
     `表=${dChat} Redis=${centerCount()}`);
-  check('★★ data_daily 的 token 与明细表合计一致（三层对账：MQ → Redis → 汇总表）',
-    Number(dTokens) === dbTokens, `表=${dTokens} 明细=${dbTokens}`);
+  check('★★ data_daily 的 token 增量与明细表增量一致（三层对账：MQ → Redis → 汇总表）',
+    Number(dTokens) - base.tableTokens === dbTokens() - base.dbTokens,
+    `表 +${Number(dTokens) - base.tableTokens} 明细 +${dbTokens() - base.dbTokens}`);
   check('★ 首字延迟在汇总表里存的是**合计**（存合计才能增量累加，平均值随时能算）',
-    Number(dFirst) > 0, `chat_first_ms_sum=${dFirst}`);
+    Number(dFirst) - base.tableFirstMs > 0, `chat_first_ms_sum +${Number(dFirst) - base.tableFirstMs}`);
   check('★ 降级次数也进了汇总表（与"降级轮次"这件事对得上账）',
-    Number(dDegraded) >= 1, `chat_degraded_count=${dDegraded}`);
+    Number(dDegraded) - base.tableDegraded >= 1,
+    `chat_degraded_count +${Number(dDegraded) - base.tableDegraded}`);
 
   // ==================== 16. 清理与自检 ====================
   section('16. 清理与自检');
@@ -1579,6 +1720,33 @@ async function main() {
     sqlSoft(`DELETE FROM fm_course.course WHERE id=${cid}`);
   }
   sqlSoft(`DELETE FROM fm_course.category WHERE name LIKE 'M4-4分类%'`);
+
+  // ★★ M6-8 补：建课时会**上传课程视频媒资**，而 `fm_media.media` 此前不在清理清单里 ——
+  //   这条缺口是"第一次真正跑通"之后才暴露的（每次跑留 2 条，媒体基线 769 → 771）。
+  //   ★ 用**接口**删（`DELETE /ms/medias/{id}`）而不是只删 DB 行：
+  //   接口会把对象存储里的文件一起清掉；只删 DB 行会留下**远端孤儿对象**
+  //   （本项目 §四 检查清单第 11 条："删测试数据要清跨库关联"）。
+  //   ★ 同时要放在"课程已删"之后 —— 课程还在引用它时，删除接口会拒绝。
+  //   ★ 只删**本次新增**的那几条（`mediaIdsBefore` 之前记下的不算本次的）
+  const listMediaIds = () => sql(`SELECT id FROM fm_media.media WHERE filename LIKE 'M6-4%'`)
+    .split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  const mediaIdsNew = listMediaIds().filter((id) => !mediaIdsBefore.has(id));
+  for (const mid of mediaIdsNew) {
+    // ★ 检查返回码（§四 检查清单第 4 条："删除操作必须检查返回码"）——
+    //   不检查的话，"没删掉"和"删掉了"在脚本里长得一样。
+    const del = await call('DELETE', `/ms/medias/${mid}`, { token: adminToken });
+    if (del.status !== 200 || del.json?.code !== 200) {
+      console.log(`    ⚠️ 媒资 ${mid} 删除失败：status=${del.status} msg=${del.json?.msg}`);
+    }
+  }
+  // ★★ 自检必须**删完再查一次**。
+  //   ⚠️ 第一版这里踩了坑：用删除**之前**的那份快照算剩余 →
+  //   结果永远是"新增了几条就剩几条" → **必然假红**（而媒体其实已经删干净了）。
+  //   教训：**"清理后自检"里的"后"，必须是真的在清理之后**。
+  const leftMediaNew = listMediaIds().filter((id) => !mediaIdsBefore.has(id)).length;
+  check('★ 本次上传的课程视频媒资无残留（经接口一并清掉对象存储里的文件；历史欠债不归本次清）',
+    // ⚠️ 必须和**数字** 0 比：`.length` 是 number，写成 `=== '0'` 会恒为 false（自己踩过，假红了一轮）
+    leftMediaNew === 0, `本次新增 ${mediaIdsNew.length} 条，剩余 ${leftMediaNew} 条`);
   // ★ 这条自检是**补上来的**：本轮发现清理段执行了、课程行却还在
   //   （`sqlSoft` 把删除失败吞掉了）。没有它时，"课程残留"是那种
   //   **跑完当场看不到、下次跑才炸**的问题（下次建同名课程会报"名称已存在"）。
@@ -1596,8 +1764,24 @@ async function main() {
   check('★ 课程内容表（content / content_draft）无残留',
     leftContent === '0' && leftContentDraft === '0',
     `content=${leftContent} content_draft=${leftContentDraft}`);
+  // ★★ M6-8 起：AI 下单会**真的落库**，所以清理必须覆盖它产生的**全部**痕迹：
+  //   主单 / 明细 / 支付单 / 课程权益。
+  //   ⚠️ `learning_lesson` 是最容易被漏的那一个 —— 订单删了、权益还在，
+  //   账面上"订单表是干净的"，但用户其实还"拥有"着这门课。
+  //   这正是本项目那条老经验：**清理漏了一侧，只有直查才发现**。
+  const aiOrderId = orderCard?.orderId || 0;
+  sqlSoft(`DELETE FROM fm_trade.trade_order_detail WHERE order_id=${aiOrderId}`);
   sqlSoft(`DELETE FROM fm_trade.trade_order_detail WHERE course_id=${m64Course?.courseId || 0}`);
-  sqlSoft(`DELETE FROM fm_trade.trade_order WHERE id=${orderCard?.orderId || 0}`);
+  sqlSoft(`DELETE FROM fm_trade.trade_order WHERE id=${aiOrderId}`);
+  sqlSoft(`DELETE FROM fm_pay.pay_order WHERE biz_order_no='${aiOrderId}'`);
+  sqlSoft(`DELETE FROM fm_learning.learning_lesson
+    WHERE user_id=${STUDENT_USER_ID} AND course_id=${m64Course?.courseId || 0}`);
+  // ★ 清理必须配自检（`sqlSoft` 会吞掉失败 → 没有自检就等于"隐藏失败"）
+  const aiOrderLeft = sql(`SELECT COUNT(*) FROM fm_trade.trade_order WHERE id=${aiOrderId}`);
+  const aiLessonLeft = sql(`SELECT COUNT(*) FROM fm_learning.learning_lesson
+    WHERE user_id=${STUDENT_USER_ID} AND course_id=${m64Course?.courseId || 0}`);
+  check('★ AI 下的订单与课程权益无残留（M6-8 起 AI 会真落库，清理必须跟上）',
+    aiOrderLeft === '0' && aiLessonLeft === '0', `order=${aiOrderLeft} lesson=${aiLessonLeft}`);
   // ★ M6-6：把"限流"和"故障注入"恢复原状。
   //   ⚠️ 这两样必须清 —— 它们都是**全局状态**：不恢复的话，
   //   下一次运行会一上来就被限流、或者检索一直是坏的，
@@ -1645,6 +1829,9 @@ async function main() {
   check('会话无残留', leftSession === '0', `剩余=${leftSession}`);
   check('消息无残留', leftMsg === '0', `剩余=${leftMsg}`);
   check('Redis prompt 快照已清', Number(leftSnap || 0) === 0, `剩余=${leftSnap}`);
+  const leftToolsSnap = redis('LLEN', MOCK_TOOLS_SNAPSHOT_KEY);
+  check('Redis 工具定义快照已清（M6-8 第 2 期新增的旁路 key）',
+    Number(leftToolsSnap || 0) === 0, `剩余=${leftToolsSnap}`);
 
   return summary();
 }

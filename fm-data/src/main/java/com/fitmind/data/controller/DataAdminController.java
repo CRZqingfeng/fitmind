@@ -29,7 +29,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/admin/data")
 @RequiredArgsConstructor
-public class DataAdminController {
+public class  DataAdminController {
 
     private final IDataQueryService queryService;
 

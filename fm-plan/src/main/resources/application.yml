@@ -1,0 +1,74 @@
+server:
+  port: 8095
+  tomcat:
+    uri-encoding: UTF-8
+
+spring:
+  application:
+    name: fm-plan
+  profiles:
+    active: local
+
+# ==================== 业务配置 ====================
+fm:
+  auth:
+    resource:
+      # 本服务没有管理端接口（P0），显式关掉，避免以后有人以为"没配 = 没开"
+      admin:
+        enabled: false
+      enable: true
+      # ★★ 这三个前缀必须与 Controller 的 @RequestMapping 一致（不带 /pls）：
+      #    网关 StripPrefix=1 会把 /pls 剥掉，到这里的路径是 /plans/**。
+      #    漏一个的后果不是"多一个接口", 而是**那组接口可以匿名调用** ——
+      #    匿名请求 UserContext.getUser() 为 null，于是写入 user_id=null 的脏数据。
+      includeLoginPaths:
+        - /plans/**
+        - /workouts/**
+        - /exercises/**
+        # ★★ M11-3 饮食侧（P1）。这四行漏掉 = 这组接口可以匿名调用：
+        #    LoginUser.id() 会抛"登录信息已失效"（还算走运），
+        #    但只要有一个接口是"先查再判"（比如删记录先查归属），
+        #    就会写出 user_id=null 的脏数据 —— 而且查的时候还查不出来。
+        - /diet/**
+        - /foods/**
+        # ⚠️ 这里两个前缀都要留：查询是 RESTful 复数（/sports），
+        #    但写记录按设计稿是单数 /sport/logs。少一个，对应那组接口就可匿名调用。
+        - /sports/**
+        - /sport/**
+        - /body/**
+      excludeLoginPaths:
+        - /health
+
+# ==================== 本地开发环境 ====================
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  cloud:
+    nacos:
+      server-addr: 127.0.0.1:8848
+      username: nacos
+      password: nacos
+      discovery:
+        group: DEFAULT_GROUP
+        namespace: public
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/fm_plan?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 1234
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fitmind: debug

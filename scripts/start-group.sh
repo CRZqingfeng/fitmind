@@ -49,8 +49,10 @@ export_if_set() {
 }
 export FM_STORAGE_TYPE="${FM_STORAGE_TYPE:-minio}"
 if [ "$FM_STORAGE_TYPE" = "oss" ]; then
-    # OSS 模式下桶名与 MinIO 不同，必须显式给
-    export_if_set FM_STORAGE_BUCKET OSS_BUCKET
+    # 桶名：注入 **OSS_BUCKET**（不要改名成 FM_STORAGE_BUCKET）。
+    #   fm.oss.bucket 读的就是 OSS_BUCKET；而 FM_STORAGE_BUCKET 是 **MinIO** 的键，
+    #   拿它兜 OSS 会把 MinIO 的桶名污染进来（2026-10-04 那次预检 404 就是这么来的）。
+    export_if_set OSS_BUCKET OSS_BUCKET
     export_if_set OSS_ENDPOINT OSS_ENDPOINT
     export_if_set OSS_PUBLIC_ENDPOINT OSS_PUBLIC_ENDPOINT
     export_if_set OSS_REGION OSS_REGION
@@ -94,6 +96,7 @@ resolve() {
         fm-exam)      echo "8092 fm-exam/target/fm-exam-1.0.0.jar" ;;
         fm-data)      echo "8093 fm-data/target/fm-data-1.0.0.jar" ;;
         fm-aigc)      echo "8094 fm-aigc/target/fm-aigc-1.0.0.jar" ;;
+        fm-plan)      echo "8095 fm-plan/target/fm-plan-1.0.0.jar" ;;
         fm-gateway)   echo "10010 fm-gateway/target/fm-gateway-1.0.0.jar" ;;
         *) return 1 ;;
     esac

@@ -145,9 +145,13 @@ logging:
 #        为了读签名有效期而直接注入 MinioProperties，一旦换后端就注入失败、服务起不来。
 fm:
   storage:
+    # ★ 本地不配任何环境变量时走哪一套。想默认走 MinIO 就把 oss 换成 minio。
+    #   ⚠️ 注意两条启动路线**默认值不同**：
+    #     · 脚本（scripts/start-all.sh）显式 `export FM_STORAGE_TYPE="${FM_STORAGE_TYPE:-minio}"` → 默认 minio
+    #     · IDEA（不经过脚本，只能用这里的默认值）→ 默认 oss
+    #   想两边一致，就显式配 `FM_STORAGE_TYPE`（Windows 用户环境变量，IDEA 用；命令行前缀，脚本用）。
     type: ${FM_STORAGE_TYPE:oss}
-    # 桶名。★ 两个后端用**同一个键**：切 type 时这里通常也要一起改。
-    #   ⚠️ 切到 OSS 记得同时设 FM_STORAGE_BUCKET=itcrz-9527（见 docs/M9-1）。
+    # ★ **MinIO 的**桶名（OSS 的桶在同级的 fm.oss.bucket，两者刻意不共用 —— 见那里的注释）。
     #   末位保留 MINIO_BUCKET 是为了**向后兼容**旧环境（此前没有任何地方设置过它）。
     bucket: ${FM_STORAGE_BUCKET:${MINIO_BUCKET:fitmind}}
     upload-expire: 3600
@@ -180,6 +184,14 @@ fm:
   #      否则 403 SignatureDoesNotMatch（浏览器会自动补 MIME，所以必须显式对齐）。
   oss:
     endpoint: ${OSS_ENDPOINT:https://oss-cn-beijing.aliyuncs.com}
+    # ★ OSS 用自己的桶名，**不共用 fm.storage.bucket**：
+    #   两个后端的桶名天然不同（MinIO=fitmind / OSS=itcrz-9527），
+    #   共用一个键就必然共用一个兜底默认值 —— 那个默认值只可能对一边正确。
+    #   ⚠️ 曾经的坑（2026-10-04）：IDEA 启动没人注入桶名 → 兜底成 fitmind
+    #      → 签出 https://fitmind.oss-cn-beijing.aliyuncs.com/...（桶不存在）
+    #      → 浏览器预检 404 NoSuchBucket，而前端只报"网络中断"。
+    #   取值优先级：OSS_BUCKET → FM_STORAGE_BUCKET → itcrz-9527
+    bucket: ${OSS_BUCKET:${FM_STORAGE_BUCKET:itcrz-9527}}
     # 给浏览器的域名。用 OSS 默认域名时与 endpoint 相同；
     # 将来绑自定义域名（需备案）时改这里 —— ★ 它同时是**签名用的域名**，两者必须一致。
     public-endpoint: ${OSS_PUBLIC_ENDPOINT:${OSS_ENDPOINT:https://oss-cn-beijing.aliyuncs.com}}

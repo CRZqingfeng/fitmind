@@ -50,7 +50,21 @@
             AND n.course_id = #{courseId}
         </if>
           AND (n.is_private = 0 OR n.user_id = #{userId})
-        ORDER BY n.note_moment
+        <!--
+            ★ M10-1 第 3 期：排序分两种。
+              · 带 section 时按 `note_moment` 升序 —— 同一动作内的时间点才有可比性，
+                这样"跟着视频复习"可以从头看到尾；
+              · 全站（广场，course/section 都是 null）时 `note_moment` **毫无意义**
+                （不同视频的"第 3 分 12 秒"混在一起），改按主键倒序 = 最新在前。
+        -->
+        <choose>
+            <when test="sectionId != null">
+                ORDER BY n.note_moment
+            </when>
+            <otherwise>
+                ORDER BY n.id DESC
+            </otherwise>
+        </choose>
     </select>
 
     <!--

@@ -63,7 +63,7 @@ public class ContextCompressor {
         if (!props.getMemory().isEnabled() || !cfg.isEnabled() || StrUtil.isBlank(sessionId)) {
             return CompressOutcome.none();
         }
-        int keep = Math.max(2, cfg.getKeepMessages());
+        int keep = Math.max(2, cfg.getKeepMessages());// 至少保留 2 条（1 轮对话）
         long total = store.size(sessionId);
         if (total <= keep) {
             return CompressOutcome.none();
@@ -78,8 +78,9 @@ public class ContextCompressor {
             return CompressOutcome.none();
         }
         int totalChars = CompressOutcome.charsOf(all);
-        boolean byCount = total > cfg.getTriggerMessages();
-        boolean byChars = totalChars > cfg.getTriggerChars();
+        boolean byCount = total > cfg.getTriggerMessages(); // 超过16条，就压缩
+        boolean byChars = totalChars > cfg.getTriggerChars(); // 超过3000字，就压缩
+        // 两个条件都未触发，就不压缩
         if (!byCount && !byChars) {
             return CompressOutcome.none();
         }
@@ -88,14 +89,17 @@ public class ContextCompressor {
         if (compressCount <= 0) {
             return CompressOutcome.none();
         }
+        //前12条消息，压缩成摘要
         List<MemoryMessage> outdated = all.subList(0, compressCount);
         long start = System.currentTimeMillis();
         try {
             String previous = store.summary(sessionId);
+            //调一次模型做摘要
             SummaryResult result = summarize(previous, outdated);
             if (result == null || StrUtil.isBlank(result.text())) {
                 return CompressOutcome.none();
             }
+            //旧摘要 + 本次摘要 → 新摘要
             String summary = merge(previous, result.text());
             store.saveSummary(sessionId, summary);
             // ★ 顺序很重要：**先存摘要、再删原文**。

@@ -101,8 +101,21 @@ public class MockChatModel implements ChatModel {
             "哑铃", "增肌", "减脂", "核心", "入门", "拉伸", "全身", "上肢", "下肢",
             "有氧", "力量", "新手", "塑形", "居家");
 
-    /** 最终回答里回显工具结果的最大字符数（太长会把回答撑爆） */
-    private static final int MAX_TOOL_ECHO = 400;
+    /**
+     * 最终回答里回显工具结果的最大字符数（太长会把回答撑爆）。
+     *
+     * <p>★★ M6-8 第 2 期把它从 <b>400 调到 1200</b>：原因是
+     * {@code queryCourseDetail} 现在会输出**整门课的目录**（按训练日聚合，见
+     * {@code CourseTools.CATALOGUE_CHAR_BUDGET}），一门 3 个训练日的课程
+     * 就有 400+ 字符 —— 卡在 400 会把 <b>Day 3 整段截掉</b>，
+     * 于是验收里"目录要含 Day 3"这条断言会**因为 mock 的截断而假红**
+     * （工具是对的、回答是被 mock 截的）。</p>
+     *
+     * <p>★ 两个上限刻意**对齐**（工具侧预算 1200 / 回显上限 1200）：
+     * 一个负责"别把超长列表全塞出去"，一个负责"别把回答撑爆" ——
+     * 数字不一致时就会出现"工具给了、模型没看到"这种最难查的情况。</p>
+     */
+    private static final int MAX_TOOL_ECHO = 1200;
 
     /** Mock 摘要里最多回显几条历史片段 */
     private static final int SUMMARIZE_FRAGMENTS = 3;
@@ -675,6 +688,43 @@ public class MockChatModel implements ChatModel {
             redis.opsForList().trim(key, 0, AigcConstants.MOCK_PROMPT_SNAPSHOT_LIMIT - 1);
         } catch (Exception e) {
             log.warn("[Mock通道] prompt 快照写入失败（不影响对话）：{}", e.getMessage());
+        }
+        // ★★ M6-8 第 2 期：同时快照"这一轮允许模型用哪些工具、每个工具的描述是什么"。
+        //   工具描述是**确定性文本** —— 用它给"约束是否放宽"（#12）提供一条不依赖模型行为的断言。
+        //   （只看真实模型的表现是不够的：模型可以对、也可以不调，"这次听话了"证明不了"规则改对了"。）
+        snapshotToolDefinitions(prompt);
+    }
+
+    /**
+     * 把本轮的工具名 + 工具描述写进 Redis（{@link AigcConstants#MOCK_TOOLS_SNAPSHOT_KEY}）。
+     *
+     * <p>格式刻意做得**好读也好断言**（一行一个工具）：</p>
+     * <pre>
+     * queryCourseDetail :: 按课程 id 查询某门课程的详细信息：……
+     * searchCourses     :: 按关键词搜索平台上已有的课程，……
+     * </pre>
+     */
+    private void snapshotToolDefinitions(Prompt prompt) {
+        try {
+            List<String> lines = new ArrayList<>();
+            if (prompt.getOptions() instanceof ToolCallingChatOptions options
+                    && options.getToolCallbacks() != null) {
+                // 用 var 而不是显式 ToolCallback/ToolDefinition：与 availableTools() 保持同一写法
+                options.getToolCallbacks().forEach(cb -> {
+                    var def = cb.getToolDefinition();
+                    lines.add(def.name() + " :: " + def.description());
+                });
+            }
+            if (lines.isEmpty()) {
+                // 没挂工具的一轮（例如 SIMPLE 策略）也要**如实记空**——
+                // 否则"上一条快照"会被误当成"这一轮的"，那是另一种假绿
+                lines.add("(本轮未挂载任何工具)");
+            }
+            redis.opsForList().leftPush(AigcConstants.MOCK_TOOLS_SNAPSHOT_KEY, String.join("\n", lines));
+            redis.opsForList().trim(AigcConstants.MOCK_TOOLS_SNAPSHOT_KEY,
+                    0, AigcConstants.MOCK_PROMPT_SNAPSHOT_LIMIT - 1);
+        } catch (Exception e) {
+            log.warn("[Mock通道] 工具定义快照写入失败（不影响对话）：{}", e.getMessage());
         }
     }
 

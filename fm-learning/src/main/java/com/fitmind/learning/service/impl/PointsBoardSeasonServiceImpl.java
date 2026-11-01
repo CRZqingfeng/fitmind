@@ -53,9 +53,22 @@ public class PointsBoardSeasonServiceImpl extends ServiceImpl<PointsBoardSeasonM
 
     @Override
     public List<PointsBoardSeasonVO> querySeasonList() {
-        // 只返回已开始的赛季（未到的赛季不该出现在下拉里）
+        // ★★ 只返回「已结束」的赛季（#C41）。
+        //
+        // ⚠️ 不要写成 le(beginTime, now) —— 那会把**正在进行**的赛季也列出来，而它的分表
+        //    要到下月 1 号结算时才建（PointsBoardJob#createTableJob），
+        //    于是下拉里出现一个**点开必然为空**的选项：
+        //      「当前赛季（实时）」= 本月（Redis 实时榜）
+        //      「2026年10月赛季」  = 同一个月的分表入口 —— 但分表现在还不存在
+        //    用户看到的就是"两个一样的选项，其中一个永远没数据"。
+        //
+        // ★ 当前赛季不由这个接口代表：前端固定有「当前赛季（实时）」这一项，
+        //   走 Redis 实时榜（数据源与分表完全不同）。
+        //
+        // ★ 顺带：`lt(endTime, today)` 也天然排除了「未开始」的赛季
+        //   （下学期 season 在每月 25 日就建好了，begin_time 在未来，end_time 必然也在未来）。
         return lambdaQuery()
-                .le(PointsBoardSeason::getBeginTime, LocalDate.now())
+                .lt(PointsBoardSeason::getEndTime, LocalDate.now())
                 .orderByDesc(PointsBoardSeason::getBeginTime)
                 .list()
                 .stream()
