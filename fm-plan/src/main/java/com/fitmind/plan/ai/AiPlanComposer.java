@@ -96,6 +96,50 @@ public class AiPlanComposer {
     private static final List<String> FRUIT_WORDS = List.of(
             "苹果", "香蕉", "橙", "西瓜", "梨", "桃", "葡萄", "莓", "桔", "橘", "柚", "猕猴桃");
 
+    /**
+     * 「已经做熟、能直接按份吃」的主食白名单（按"适合当正餐"的顺序）。
+     *
+     * <p><b>为什么必须有一份白名单，而不是按热量密度筛：</b>
+     * 主食分类里 136 条，绝大多数是**生粮/干粉**（稻米 346、小麦粉 359、龙须面 352、燕麦 338）。
+     * 用"每 100g 热量 ≥200"当"能不能按份吃"的代理指标，等于说"热量密度高的才是主食" ——
+     * 结果把最该出现的**米饭（116）、煮面条（107）**排掉了，而米饭密度低只是**因为它含水**。</p>
+     *
+     * <p>实测后果（M11-5 验收全绿、但人看菜单才发现）：5 天菜单的早餐是
+     * 「稻米 100g + 猪肉 + 牛奶」—— 用户照着买可以，照着吃不行。</p>
+     *
+     * <p>★ 这是**人工判断的表**，不是规则引擎：写在这里是为了让下一个人看见"为什么是这 13 条"。
+     * 数据集里"面条（富强粉，煮）107"和"面条（生，代表值）"是两条，靠"煮/生"就能分 ——
+     * 这种区分只能人工确认，写成 `if 名字含煮 就 …` 迟早会错。</p>
+     *
+     * <p>顺序 = 轮转顺序：5 天 × 3 正餐 = 15 个槽位，取前 {@link #STAPLE_POOL_SIZE} 个轮转，
+     * 所以米饭/面条/馒头排前面，油条/油饼（油炸）排后面基本用不到。</p>
+     */
+    private static final List<String> COOKED_STAPLES = List.of(
+            "米饭（蒸，代表值）",   // 116，最标准的一碗饭
+            "面条（富强粉，煮）",   // 107，煮面（不是干挂面 353）
+            "馒头（代表值）",       // 223
+            "粳米饭（蒸）",         // 118
+            "籼米饭（蒸）",         // 117
+            "馒头（标准粉）",       // 236
+            "烙饼（标准粉）",       // 258
+            "烧饼（加糖）",         // 298
+            "馒头（富强粉）",       // 235
+            "米粉",                 // 349
+            "空锅饼",               // 278
+            "油条",                 // 388（油炸，排后面）
+            "油饼");                // 403（同上）
+
+    /** 主食池取前几个（5 天 × 3 正餐轮转够用，再多也不会被用到） */
+    private static final int STAPLE_POOL_SIZE = 6;
+
+    /** 白名单一条都匹配不上时的兜底区间：太稀的（粥 46、蒸马铃薯 69）一顿要吃 1kg，不算"一份" */
+    private static final int STAPLE_FALLBACK_MIN_KCAL = 90;
+    private static final int STAPLE_FALLBACK_MAX_KCAL = 420;
+
+    /** 加餐的固定份量：奶 100g、水果 100g（★ 加餐**不参与缩放**，见 buildPortions） */
+    private static final int SNACK_DAIRY_GRAM = 100;
+    private static final int SNACK_FRUIT_GRAM = 100;
+
     private final PlanDayMapper planDayMapper;
     private final PlanDayItemMapper planDayItemMapper;
     private final ExerciseMapper exerciseMapper;
@@ -459,34 +503,54 @@ public class AiPlanComposer {
                 addPortion(portions, pick(pool.vegetables(), rotate + 1), 150);
             }
             default -> {
-                // 加餐：奶 + 水果；没有奶就用坚果 + 水果
+                // 加餐：一杯奶 + 一份水果；没有奶就用坚果 + 水果
+                // ★ 份量固定 100g / 100g（A30）：原来从 150g/120g 起步再缩放，
+                //   会被压到"酸奶 30g"这种不像一份的克数 —— 而加餐的目标热量只有 91 千卡
+                //   （0.05 占比），无论怎么缩都会显得别扭。**不如给固定份量、不缩放**，
+                //   多出来的热量由主食缩放吸收（实测 5 天偏差 -7.9%~+2.0%）。
                 Food dairy = pick(pool.dairy(), rotate);
                 if (dairy != null) {
-                    addPortion(portions, dairy, 150);
+                    addPortion(portions, dairy, SNACK_DAIRY_GRAM);
                 } else {
                     addPortion(portions, pick(pool.nuts(), rotate), 20);
                 }
-                addPortion(portions, pick(pool.fruits(), rotate), 120);
+                addPortion(portions, pick(pool.fruits(), rotate), SNACK_FRUIT_GRAM);
+                // ★ 加餐到此为止：不参与下面的"把总热量拉到目标"
+                return portions;
             }
         }
 
         // 把总热量拉到目标（±10% 以内就停）。
-        // ★ 优先缩放"主食"；加餐没有主食（奶 + 水果），就缩放热量最大的那一项。
-        //   不做这一步的话，加餐会稳定高出 50%（目标 107 千卡，实际 162）——
-        //   三顿加餐一起偏，一天就多出 160 千卡，而单看每一餐都"不算离谱"。
+        // ★ 优先缩放"主食"：主食是最"可伸缩"的一项，调鸡胸肉会让"100g 鸡胸"变成"63g 鸡胸"这种不像人写的数字。
         int scaleIdx = indexOfStaple(portions);
         if (scaleIdx < 0) {
+            // 正餐里没有主食（理论上不会发生：白名单/兜底都保证有）——退化成"缩放最大项"
             scaleIdx = indexOfMaxKcal(portions);
         }
         if (scaleIdx >= 0 && targetKcal > 0) {
+            int prevDiff = Integer.MAX_VALUE;
             boolean staple = "主食".equals(portions.get(scaleIdx).food().getCategory());
             int min = staple ? 40 : 30;
-            int max = staple ? 400 : 300;
+            // ★ 上限 480g（≈2.5 碗米饭）而不是 400g：预算是"6 餐分摊"的，
+            //   正餐要凑到 640 千卡，而「米饭 + 一份蛋白 + 一份蔬菜」在 400g 封顶时只有约 600 —— 
+            //   实测第 3 天偏差 -9.2%，贴上 10% 的红线。
+            //   480g 米饭确实偏多，但那是**真实的量**（644 千卡本来就该吃这么多主食）；
+            //   把上限压低会让"每天吃不够"，那才是更糟的假象。
+            int max = staple ? 480 : 300;
             for (int guard = 0; guard < 8; guard++) {
                 int total = totalKcal(portions);
-                if (total > 0 && Math.abs(total - targetKcal) * 1.0 / targetKcal <= 0.10) {
+                // ★ 收紧到 ±5%（原 ±10%）：主食从"生米 346"换成"米饭 116"后，
+                //   一次按比例缩放常常落在 -9%，而 -9% <= 10% 就 break 了 ——
+                //   单餐看着"没超 10%"，三餐叠起来正好贴上红线（实测第 3 天 -9.2%）。
+                if (total > 0 && Math.abs(total - targetKcal) * 1.0 / targetKcal <= 0.05) {
                     break;
                 }
+                // 防振荡：这一轮不如上一轮接近目标，就停手（10g 步长下不会来回跳）
+                int diff = Math.abs(total - targetKcal);
+                if (diff >= prevDiff) {
+                    break;
+                }
+                prevDiff = diff;
                 Portion cur = portions.get(scaleIdx);
                 int next = (int) Math.round(cur.gram() * (targetKcal * 1.0 / Math.max(1, total)) / 10.0) * 10;
                 next = Math.max(min, Math.min(max, next));
@@ -599,32 +663,44 @@ public class AiPlanComposer {
                 }
             }
         }
-        // ★★ 三处"能按份吃"的门槛（M11-5 §7.4）。
+        // ★★ 两处"能按份吃"的门槛（M11-5 §7.4 + A30 修正）。
         //
-        //   起因：排餐逻辑写死了份量假设 —— 早餐"主食 100g + 蛋白 50g + 奶 250g"。
-        //   30 条种子时这些假设都成立（米面、鸡胸、牛奶）；1638 条时池子里混进了
-        //   奶粉（478）、奶油（350）、油面筋（492）、油饼（403）……
-        //   实测后果：第 4 天早餐 1296 千卡（目标 536），一周偏差 +43.5%，
-        //   而"只调主食克数"救不回来（它被夹在 40~400g 之间）。
-        //
-        //   ① 主食：排掉低密度（马铃薯 77 / 玉米 112 —— 一顿要吃 600g，那不是"一餐"是"一盆"），
-        //      再按 sort 取前 5（不再按密度降序：全量后密度最高的恰好是油面筋/油饼这种油炸点心）。
-        //   ② 奶：只留 ≤100 千卡/100g —— "250g" 是"一杯"的量，奶粉/奶油/黄油不能按杯算。
-        //   ③ 其余池子不动：轮转下标最大 6，只会用到 sort 最前的几条（人工挑的）。
-        //
-        //   ★ 这三条**不改算法、不加权重**，只是把"份量假设"重新变成真的；
-        //     30 条种子下池子与改动前完全一致（实测偏差 5.8% → 5.5%，同量级）。
-        List<Food> dense = new ArrayList<>(staples.size());
+        //   ① 主食：**按白名单取"做熟的"**（{@link #COOKED_STAPLES}），不再按热量密度筛。
+        //      旧写法是 `kcal_per_100g >= 200` —— 那条门槛是为修"奶粉 250g = 1195 千卡"加的，
+        //      但它把"含水所以密度低"的米饭（116）、煮面（107）一起排掉了，
+        //      于是菜单里只剩生米/面粉/干面条（用户照着买可以，照着吃不行）。
+        //      白名单一条都匹配不上时，才回落到"90~420 千卡/100g"的兜底区间
+        //      （排掉粥 46、蒸马铃薯 69 这种"一顿要吃 1kg"的）。
+        //   ② 奶：只留 ≤100 千卡/100g —— "一杯"的量，奶粉（478）/奶油（350）不能按杯算。
+        //   ③ 其余池子不动：轮转下标最大 6，只会用到 sort 最前的几条。
+        Map<String, Food> stapleByName = new LinkedHashMap<>();
         for (Food f : staples) {
-            Integer kcal = f.getKcalPer100g();
-            if (kcal != null && kcal >= 200) {
-                dense.add(f);
+            stapleByName.putIfAbsent(f.getName(), f);
+        }
+        List<Food> denseStaples = new ArrayList<>(STAPLE_POOL_SIZE);
+        for (String name : COOKED_STAPLES) {
+            Food f = stapleByName.get(name);
+            if (f != null && denseStaples.size() < STAPLE_POOL_SIZE) {
+                denseStaples.add(f);
             }
         }
-        if (dense.isEmpty()) {
-            dense = staples;   // 库里全是低密度主食时，宁可给低密度也别"没主食"
+        if (denseStaples.isEmpty()) {
+            // 兜底：库里没有白名单里的任何一条（换数据集/库被清过）——不许"没主食"，按区间筛
+            for (Food f : staples) {
+                Integer kcal = f.getKcalPer100g();
+                if (kcal != null && kcal >= STAPLE_FALLBACK_MIN_KCAL && kcal <= STAPLE_FALLBACK_MAX_KCAL) {
+                    denseStaples.add(f);
+                }
+            }
+            if (denseStaples.size() > STAPLE_POOL_SIZE) {
+                denseStaples = new ArrayList<>(denseStaples.subList(0, STAPLE_POOL_SIZE));
+            }
+            if (denseStaples.isEmpty()) {
+                denseStaples = staples;   // 最后兜底：宁可给低密度也别"没主食"
+            }
+            log.warn("主食白名单一条都没匹配上（库里没有 COOKED_STAPLES 里的名字），已回落到密度区间；"
+                    + "如果刚换过数据集，请更新 AiPlanComposer.COOKED_STAPLES");
         }
-        List<Food> denseStaples = dense.size() > 5 ? new ArrayList<>(dense.subList(0, 5)) : dense;
 
         List<Food> liquidDairy = new ArrayList<>(dairy.size());
         for (Food f : dairy) {

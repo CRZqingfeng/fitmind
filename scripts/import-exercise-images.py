@@ -27,7 +27,12 @@
    `arn:aws:s3:::fitmind/action-cover/*`（脚本启动会自检一次）。
 3. **对象 key 用数据集 id，不用 DB 自增 id**：换环境（本机/部署/重装后重导）
    自增 id 必然不同，用 slug 才能"任何环境重跑都是同一份 key"，也才能幂等。
-4. **回写按 `name` 匹配，不按 `en_name`**：108 条 P0 种子的 `en_name` 是"空格版"
+4. **封面必须取「第一帧」`0.jpg`，不是列表里最后那帧。** 早期版本是"遍历 images、
+   每张都写一次 db_id → 后写的赢"，于是 873 条全变成 `1.jpg`；而 `0.jpg`（动作最高点）
+   缩略图更清楚，反而成了**没人引用的孤儿对象**（873 张、约 50MB）。
+   → 现在的规则：`0.jpg` 作封面（写进 `image_url`），`1.jpg` 照样上传但留给详情页当"第二帧"。
+   顺带补一条自检：桶内对象数应当 = 动作数 × 2，否则说明"传了但没被引用"或"传漏了"。
+5. **回写按 `name` 匹配，不按 `en_name`**：108 条 P0 种子的 `en_name` 是"空格版"
    （`Barbell Bench Press - Medium Grip`），与数据集 id（`Barbell_Bench_Press_-_Medium_Grip`）
    不是同一个字符串 —— 按 en_name 匹配会漏掉一批，而漏掉的表现是"部分图不显示"。
 
@@ -424,11 +429,13 @@ def main():
     # ---- 回写 DB ----
     # ★ 只回写"上传成功或本来就存在"的 key，失败的**不许**写进库
     failed_keys = {k for k, _n, _m in fails}
-    keys_by_id = {}
+    # ★★ 封面只取**第一帧**（`0.jpg`）：tasks 的顺序是"数据顺序 × images 顺序"，
+    #    所以每条动作的第一张就是 0.jpg。旧写法是"每张都写 db_id → 后写的赢"，
+    #    结果 873 条全成了 1.jpg，0.jpg 变成孤儿对象（≈50MB 白传）。
+    first_key_of_id = {}
     for key, img, db_id, name in tasks:
-        if key in failed_keys:
-            continue
-        keys_by_id[db_id] = key
+        first_key_of_id.setdefault(db_id, key)
+    keys_by_id = {i: k for i, k in first_key_of_id.items() if k not in failed_keys}
     print("\n[5] 回写 DB `image_url` = 对象 key")
     current = current_image_urls()
     need, changed = write_back(keys_by_id, current, apply_changes=True)
@@ -450,6 +457,15 @@ def main():
     r = subprocess.run([MYSQL, "--default-character-set=utf8mb4", "-h127.0.0.1", "-P3306",
                         "-uroot", "-p1234", "-N", "-e", check_sql], capture_output=True)
     print("    %s" % r.stdout.decode("utf-8", "ignore").strip())
+
+    # ★ 孤儿自检：桶里的对象数 vs DB 引用数。差值是"预留的第二帧"（1.jpg），
+    #   如果差值不等于动作数，说明有对象传了但两条都指向同一帧、或者传漏了。
+    db_refs = len(set(keys_by_id.values()))
+    objs = sum(1 for _ in client.list_objects(bucket, prefix=PREFIX, recursive=True))
+    print("    桶内 %s 下 %d 个对象 / DB 引用 %d 个 key → 预留第二帧 %d 个（预期 = 引用数）"
+          % (PREFIX, objs, db_refs, objs - db_refs))
+    if objs - db_refs != db_refs:
+        print("    ⚠️ 对象数与引用数不是 2:1 —— 可能有上传漏了，或者有几条只传了一帧")
 
     if args.verify:
         print("\n[7] 验证 5 张可匿名访问（200 / image/jpeg / >10000）")

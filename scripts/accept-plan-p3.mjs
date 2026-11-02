@@ -253,6 +253,17 @@ async function main() {
   check('动作库接口返回 5 条', cards.length === 5, String(cards.length))
   check('★ imageUrl 是**绝对地址**（DB 存 key，后端拼 base-url）',
     cards.every((c) => String(c.imageUrl || '').startsWith('http')), cards[0]?.imageUrl)
+  // ★ 先探一次"对象存储到底起没起"：Docker Desktop 关掉时 MinIO 整台不在，
+  //   报错会是 `fetch failed`（看不出是环境问题）。这里先给一句人话。
+  let storageUp = true
+  try {
+    await fetch(cards[0].imageUrl, { method: 'HEAD' })
+  } catch {
+    storageUp = false
+  }
+  check('★ 对象存储可达（9000）—— 不通请先开 Docker Desktop，`fm-minio` 容器要 Up',
+    storageUp, storageUp ? '' : '连不上 → 图片那条必然红，但那是环境不是代码')
+
   let imgBad = []
   for (const c of cards.slice(0, 5)) {
     try {
@@ -263,7 +274,7 @@ async function main() {
         imgBad.push(`${r.status}/${ctype}/${buf.byteLength} ${c.imageUrl}`)
       }
     } catch (e) {
-      imgBad.push(`ERR ${c.imageUrl} ${e.message}`)
+      imgBad.push(`${c.imageUrl} ${e.message}`)
     }
   }
   check('★★ 5 张图全部 200 + image/jpeg + >10000 字节（不带签名参数直接 GET）',
@@ -277,6 +288,13 @@ async function main() {
   check('★★ image_url 以 http 开头的 = 0（全转成 key）', httpLeft === 0, String(httpLeft))
   const keyed = Number(sql("SELECT COUNT(*) FROM fm_plan.exercise WHERE image_url LIKE 'action-cover/exercise/%'"))
   check('★ 873 条全是 action-cover/exercise/ 形态的 key', keyed === 873, String(keyed))
+  // ★★ A31：封面必须取**第一帧 0.jpg**（动作最高点，缩略图最清楚）。
+  //   早期脚本"每张图都写一次 db_id → 后写的赢"→ 873 条全成了 1.jpg，
+  //   而 0.jpg 白传了一遍（873 张 ≈50MB 孤儿对象）。
+  const frameZero = Number(sql("SELECT COUNT(*) FROM fm_plan.exercise WHERE image_url LIKE '%/0.jpg'"))
+  check('★★ 封面全部取第一帧 0.jpg（A31：不再误写成 1.jpg）', frameZero === 873, String(frameZero))
+  const distinctKeys = Number(sql('SELECT COUNT(DISTINCT image_url) FROM fm_plan.exercise'))
+  check('★ 873 条 key 互不相同（没有两条指向同一张图）', distinctKeys === 873, String(distinctKeys))
 
   // ==================== 11. 食物条数 ====================
   section('11. 食物库：1638 条，16 条"热量缺失"的没进来')
@@ -348,16 +366,46 @@ async function main() {
          AND f.kcal_per_100g > 100`))
     check('★★ 排进计划的"奶"项全部 ≤100 千卡/100g（没有"奶粉 250g=1195 千卡"这种餐）',
       dairyBad === 0, `${dairyBad} 个高密度奶`)
-    // 主食：≥200 千卡/100g（500g 马铃薯不是"一餐"）
-    const stapleBad = Number(sql(
+    // ★★ A30：主食必须是"做熟能直接吃"的，不能是生粮/干粉。
+    //   旧断言是「主食 ≥200 千卡/100g」—— 那条**把 bug 写成了期望值**：
+    //   门槛原本是为修"奶粉 250g"拍的，结果把含水所以密度低的米饭（116）、煮面（107）排掉了，
+    //   菜单里只剩「稻米 100g / 小麦粉 80g」（照买可以，照吃不行）。断言照着门槛抄，于是红不了。
+    //   ★ 教训：断言"数值区间"之前先问"这个区间是谁定的"。
+    // ★ 期望值是**白名单**（不是"排除生粮"的正则）：
+    //   我先写成 `REGEXP '稻米|粳米|籼米…'`，结果把「粳米饭（蒸）」「籼米饭（蒸）」这两条
+    //   **熟食**也误判成生粮了（名字里就带"粳米"）。正则判"是不是生粮"天然会误伤，
+    //   而白名单判"是不是这几种成品"不会 —— 这也符合"期望值要能推导"：
+    //   产品说"AI 计划的主食就是这几种"，断言就该照这个判。
+    //   ⚠️ 这份清单来自 fm-plan `AiPlanComposer.COOKED_STAPLES`（前 STAPLE_POOL_SIZE=6 条）。
+    //      改白名单要同步改这里；验收脚本持有独立期望值是对的，别去掉。
+    const EXPECT_STAPLES = [
+      '米饭（蒸，代表值）', '面条（富强粉，煮）', '馒头（代表值）',
+      '粳米饭（蒸）', '籼米饭（蒸）', '馒头（标准粉）',
+    ]
+    const stapleNames = rows(
+      `SELECT DISTINCT f.name FROM fm_plan.diet_plan_meal_item i
+       JOIN fm_plan.food f ON f.id = i.food_id
+       JOIN fm_plan.diet_plan_meal m ON m.id = i.meal_id
+       JOIN fm_plan.diet_plan_day d ON d.id = m.diet_plan_day_id
+       WHERE d.diet_plan_id = ${pv.dietDraftId} AND f.category = '主食'`)
+    const notCooked = stapleNames.map((r) => r[0]).filter((n) => !EXPECT_STAPLES.includes(n))
+    check('★★ 排进计划的"主食"全部是**做熟的**（在白名单里；稻米/小麦粉/龙须面都不能直接吃）',
+      notCooked.length === 0, notCooked.join(' / ') || stapleNames.map((r) => r[0]).join(' / '))
+    check('★★ 主食里至少出现「米饭 / 面条 / 馒头」中的 2 种（证明真用了成品主食）',
+      stapleNames.filter((r) => /米饭|面条|馒头/.test(r[0])).length >= 2,
+      stapleNames.map((r) => r[0]).join(' / '))
+
+    // ★ A30 附带的加餐份量下限：旧逻辑会把"100g 酸奶"缩到 30g
+    const snackTiny = Number(sql(
       `SELECT COUNT(*) FROM fm_plan.diet_plan_meal_item i
        JOIN fm_plan.food f ON f.id = i.food_id
        JOIN fm_plan.diet_plan_meal m ON m.id = i.meal_id
        JOIN fm_plan.diet_plan_day d ON d.id = m.diet_plan_day_id
-       WHERE d.diet_plan_id = ${pv.dietDraftId}
-         AND f.category = '主食' AND f.kcal_per_100g < 200`))
-    check('★★ 排进计划的"主食"项全部 ≥200 千卡/100g（马铃薯/玉米这类低密度不进 AI 计划）',
-      stapleBad === 0, `${stapleBad} 个低密度主食`)
+       WHERE d.diet_plan_id = ${pv.dietDraftId} AND m.meal_type = 4
+         AND f.name NOT REGEXP '花生|核桃|杏仁'
+         AND i.amount < 100`))
+    check('★ 加餐份量 ≥100g（不再出现"酸奶 30g"这种不像一份的克数）',
+      snackTiny === 0, `${snackTiny} 个小份加餐`)
     // 抽查一份"奶"的名称，证明它真的是液态奶而不是奶粉
     const dairyNames = rows(
       `SELECT DISTINCT f.name FROM fm_plan.diet_plan_meal_item i
