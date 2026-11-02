@@ -305,6 +305,50 @@ public class PlanServiceImpl extends ServiceImpl<PlanMapper, Plan> implements IP
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void abandonPlan(Long planId) {
+        Long userId = LoginUser.id();
+
+        // ★ 查询自带 user_id 条件（uk_user_plan(user_id, plan_id) 唯一）→
+        //   别人的 user_plan 根本查不到，不需要再单独判"是不是你的"。
+        //   查不到 = 你没执行过这个计划，这比抛 403 更准确：连"存在"都不泄露。
+        UserPlan userPlan = userPlanMapper.selectOne(Wrappers.<UserPlan>lambdaQuery()
+                .eq(UserPlan::getUserId, userId)
+                .eq(UserPlan::getPlanId, planId)
+                .last("limit 1"));
+        if (userPlan == null) {
+            throw new BizIllegalException(400, PlanErrorInfo.Msg.USER_PLAN_NOT_EXISTS);
+        }
+        if (Objects.equals(userPlan.getStatus(), PlanConstants.USER_PLAN_GIVE_UP)) {
+            // 幂等：已经停过了，再点一次当成功（弹红字会让用户以为没生效）
+            log.info("重复停止执行（幂等）：userId={}, planId={}, userPlanId={}", userId, planId, userPlan.getId());
+            return;
+        }
+        if (Objects.equals(userPlan.getStatus(), PlanConstants.USER_PLAN_FINISHED)) {
+            // 已练完的计划没有"停下来"这个动作；允许它会让"已完成"和"已放弃"互相覆盖
+            throw new BizIllegalException(400, PlanErrorInfo.Msg.USER_PLAN_FINISHED_CANNOT_ABANDON);
+        }
+
+        // ★ 带 status=RUNNING 条件更新：并发下（两个标签页同时点）只有一次能改成功，
+        //   另一次影响行数 0 —— 结果一致，不需要加锁。
+        userPlanMapper.update(null, Wrappers.<UserPlan>lambdaUpdate()
+                .eq(UserPlan::getId, userPlan.getId())
+                .eq(UserPlan::getStatus, PlanConstants.USER_PLAN_RUNNING)
+                .set(UserPlan::getStatus, PlanConstants.USER_PLAN_GIVE_UP));
+
+        // ★ 练到一半跑掉的会话一并收掉：留着的话它永远停在"进行中"，
+        //   组明细都在、却永远完不成（而 startWorkout 又因为计划已停而进不去）。
+        //   只动 status=RUNNING 的，已完成的训练一条不碰（累计分钟不能变小）。
+        int abandonedSessions = sessionMapper.update(null, Wrappers.<WorkoutSession>lambdaUpdate()
+                .eq(WorkoutSession::getUserPlanId, userPlan.getId())
+                .eq(WorkoutSession::getStatus, PlanConstants.SESSION_RUNNING)
+                .set(WorkoutSession::getStatus, PlanConstants.SESSION_GIVE_UP));
+
+        log.info("停止执行计划：userId={}, planId={}, userPlanId={}, 收掉未完成会话={} 条",
+                userId, planId, userPlan.getId(), abandonedSessions);
+    }
+
+    @Override
     public TodayWorkoutVO queryToday() {
         Long userId = LoginUser.id();
         LocalDate today = LocalDate.now();

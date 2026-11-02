@@ -123,6 +123,20 @@ export function executePlan(planId: string): Promise<string> {
 }
 
 /**
+ * 停止执行这个计划（`user_plan.status` → 2 已放弃）。
+ *
+ * ★ 用 **planId** 而不是 userPlanId：`(当前用户, planId)` 已经能唯一定位那条执行记录
+ *   （`uk_user_plan` 唯一），而「我的计划」列表里本来就只有 planId。
+ *
+ * ★ 幂等：已经停过再调一次也返回成功；**已练完的计划**会被拒
+ *   （`code:400` + "这个计划已经全部练完了…"），因为"已完成"和"已放弃"不能互相覆盖。
+ * ★ 副作用：该计划下**没练完**的训练会话会被一并标成"已放弃"，已完成的训练一条不动。
+ */
+export function abandonPlan(planId: string): Promise<void> {
+  return http.put<void>(`/pls/plans/${planId}/abandon`)
+}
+
+/**
  * 编辑计划（改名 / 描述 / 目标 / 难度）。**不传 / 传空串 = 不改**。
  *
  * 例外：`summary` 传空串 = 真的清空描述。

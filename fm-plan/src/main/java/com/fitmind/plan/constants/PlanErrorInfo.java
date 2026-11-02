@@ -78,6 +78,14 @@ public class PlanErrorInfo {
         /** 一个文案覆盖"已完成"和"已放弃"：对用户来说下一步动作是同一个（重新执行） */
         public static final String USER_PLAN_NOT_RUNNING = "这个计划已经结束了，重新「执行本计划」就能接着练";
 
+        /**
+         * 已经练完的计划不让「停止执行」。
+         *
+         * <p>为什么不允许：允许的话"已完成"会被改写成"已放弃" —— 两个语义落到同一个字段，
+         * 进度、徽标、统计全都要重新解释一遍。练完了就是练完了，没有"停下来"这个动作。</p>
+         */
+        public static final String USER_PLAN_FINISHED_CANNOT_ABANDON = "这个计划已经全部练完了，没有要停的执行；想练新计划直接去定制或挑一个";
+
         public static final String SESSION_NOT_EXISTS = "找不到这次训练，它可能已被清理";
 
         public static final String SESSION_NOT_OWNER = "这不是你的训练记录";

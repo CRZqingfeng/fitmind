@@ -88,4 +88,20 @@ public class PlanController {
             @Parameter(description = "计划id", example = "1") @PathVariable("id") Long id) {
         return planService.executePlan(id);
     }
+
+    /**
+     * 停止执行这个计划（status → 2 已放弃）。
+     *
+     * <p>★ 用 {@code planId} 而不是 {@code userPlanId}：{@code uk_user_plan(user_id, plan_id)} 唯一，
+     * 所以 (当前用户, planId) 就能定位那一条 —— 前端「我的计划」列表里现成有 planId，
+     * 不用为了这个按钮给 {@code MyPlanVO} 再加一个 id 字段（加完两个 id 一定会有人传错那个）。</p>
+     *
+     * <p>幂等：已经放弃过再调一次返回成功，不报错。</p>
+     */
+    @Operation(summary = "停止执行计划（幂等；只停自己的、不碰已完成的训练记录）")
+    @PutMapping("/{id}/abandon")
+    public void abandon(
+            @Parameter(description = "计划id", example = "1") @PathVariable("id") Long id) {
+        planService.abandonPlan(id);
+    }
 }

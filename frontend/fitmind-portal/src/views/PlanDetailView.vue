@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 
-import { executePlan, getPlanDetail } from '@/api/plan'
+import { abandonPlan, executePlan, getPlanDetail } from '@/api/plan'
 import DayCard from '@/components/plan/DayCard.vue'
 import type { PlanDetail } from '@/types/plan'
 
@@ -80,6 +80,38 @@ async function handleExecute() {
 
 function goEdit() {
   router.push(`/plan/edit/${planId.value}`)
+}
+
+/**
+ * 停止执行（A32）。
+ *
+ * ★ 只在 `userPlanStatus === 0`（进行中）时出现：
+ *   `null` = 没执行过，`1` = 已练完，`2` = 已放弃 —— 三者都没有"停下来"这个动作。
+ * ★ 二次确认：这个按钮在计划详情的最底部，和「重新执行本计划」挨着，
+ *   不确认的话很容易点反（一个让计划开始，一个让计划结束）。
+ */
+async function handleAbandon() {
+  const d = detail.value
+  if (!d || submitting.value) return
+  try {
+    await ElMessageBox.confirm(
+      `停止后「${d.title}」不再出现在今日训练里，已练过的记录都会保留。确定停止吗？`,
+      '停止执行计划',
+      { type: 'warning', confirmButtonText: '停止执行', cancelButtonText: '再想想' },
+    )
+  } catch {
+    return
+  }
+  submitting.value = true
+  try {
+    await abandonPlan(planId.value)
+    ElMessage.success('已停止执行')
+    await load() // 重新拉一次：userPlanStatus 要变成 2，按钮才跟着消失
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '停止失败')
+  } finally {
+    submitting.value = false
+  }
 }
 </script>
 
@@ -157,9 +189,21 @@ function goEdit() {
         :editable="false"
       />
 
-      <!-- 底部固定双按钮 -->
+      <!-- 底部固定按钮区 -->
       <div class="bottom-bar">
         <el-button v-if="detail.editable" size="large" @click="goEdit">编辑</el-button>
+        <!-- ★ A32：进行中才有「停止执行」。放在主按钮左边（危险动作用次要位置），
+             且文案带"执行"两个字，避免和「编辑/重新执行」混淆 -->
+        <el-button
+          v-if="detail.userPlanStatus === 0"
+          size="large"
+          type="danger"
+          plain
+          :loading="submitting"
+          @click="handleAbandon"
+        >
+          停止执行
+        </el-button>
         <el-button
           type="primary"
           size="large"

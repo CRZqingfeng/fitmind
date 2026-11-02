@@ -104,3 +104,10 @@ deploy/upstream.txt
 # 与两次绕开沙箱清理的构建产物（`.verify-dist*/`）。都是本机 scratch，不入库。
 .tmp-plan-doc/
 frontend/fitmind-portal/.verify-dist*/
+
+# ==================== Python 字节码 ====================
+# 三个导入脚本（import-exercise-db / import-food-db / import-exercise-images）跑一次
+# 就会在 scripts/__pycache__/ 下留下 .pyc。以前没忽略，`git status` 里一直挂着
+# 三个"已修改/未跟踪"的二进制 —— 提交时很容易连垃圾一起带上（2026-11-02 补）。
+__pycache__/
+*.pyc

@@ -43,6 +43,18 @@ public interface IPlanService extends IService<Plan> {
     /** 执行本计划（幂等：重复调用复用同一行 user_plan，并重置 start_date），返回 userPlanId */
     Long executePlan(Long planId);
 
+    /**
+     * 停止执行（放弃）这个计划。
+     *
+     * <p>幂等：已经放弃过再调一次直接返回成功 —— 用户连点两下 / 两个标签页，
+     * 第二次弹红字会让他以为"停止失败"，从而点第三次。</p>
+     *
+     * <p>★ 只动 {@code user_plan.status} 和该计划下**未完成**的训练会话，
+     * <b>已完成的训练一条不动</b>：累计训练分钟是按 {@code duration_sec} 求和的，
+     * 动了历史数字会莫名变小。</p>
+     */
+    void abandonPlan(Long planId);
+
     /** 今日训练（三态 + 今日/累计分钟数） */
     TodayWorkoutVO queryToday();
 }

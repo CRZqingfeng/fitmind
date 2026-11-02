@@ -1,11 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { LocationQueryRaw } from 'vue-router'
 import { useRoute, useRouter } from 'vue-router'
 
-import { getMyPlans, getPlanDict, getRecommendPlans, getTodayWorkout, startWorkout } from '@/api/plan'
+import {
+  abandonPlan,
+  getMyPlans,
+  getPlanDict,
+  getRecommendPlans,
+  getTodayWorkout,
+  startWorkout,
+} from '@/api/plan'
 import DietHome from '@/components/plan/DietHome.vue'
 import PlanCard from '@/components/plan/PlanCard.vue'
 import type { MyPlan, PlanCard as PlanCardType, PlanDict, TodayWorkout } from '@/types/plan'
@@ -175,6 +182,52 @@ function goCustom() {
   router.push('/plan/ai')
 }
 
+/**
+ * 「我的计划」的展示顺序：**已放弃的沉底**，其余按后端给的顺序（update_time desc）。
+ *
+ * ★ 为什么不改后端 SQL：放弃会让 update_time 变新，那条记录自然跳到最前 ——
+ *   而"放弃的"恰恰是最不需要被看见的。这是纯展示诉求，前端排一次就够，
+ *   后端排序保持"最近动过的在前"这个通用语义不变。
+ */
+const mineSorted = computed(() => {
+  const alive = mine.value.filter((p) => p.status !== 2)
+  const abandoned = mine.value.filter((p) => p.status === 2)
+  return [...alive, ...abandoned]
+})
+
+/** 正在请求停止的计划 id（防连点；同时也给按钮做 loading） */
+const abandoningId = ref<string>('')
+
+/**
+ * 停止执行某个计划。
+ *
+ * ★ 二次确认是必须的：这个动作会让「今日训练」直接换一份（或变回"还没有计划"），
+ *   而首页是用户最常待的地方，误点一下就把正在练的计划停掉，很难解释。
+ * ★ 后端幂等 + 已练完会被拒，所以这里不再自己判状态，只把后端文案原样弹出来。
+ */
+async function handleAbandon(p: MyPlan) {
+  if (abandoningId.value) return
+  try {
+    await ElMessageBox.confirm(
+      `停止后「${p.title}」不再出现在今日训练里，已练过的记录都会保留。确定停止吗？`,
+      '停止执行计划',
+      { type: 'warning', confirmButtonText: '停止执行', cancelButtonText: '再想想' },
+    )
+  } catch {
+    return // 用户点了取消
+  }
+  abandoningId.value = p.id
+  try {
+    await abandonPlan(p.id)
+    ElMessage.success('已停止执行，可以重新挑一个计划了')
+    await load()
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '停止失败')
+  } finally {
+    abandoningId.value = ''
+  }
+}
+
 async function createEmpty() {
   router.push('/plan/edit/new')
 }
@@ -263,6 +316,11 @@ function goPlans() {
             <div class="big-text">今天没有安排训练</div>
             <div class="tip-text">{{ today.tips }}</div>
             <div class="rest-emoji">🛌</div>
+            <!-- ★ A32：有计划在执行时也要能换一份。只剩"今天休息"四个字、没有任何出口，
+                 用户唯一的办法是手敲 /plan/ai —— 第一个真实用户就是这么卡住的 -->
+            <div class="actions">
+              <el-button @click="goCustom">再定制一份</el-button>
+            </div>
           </div>
 
           <!-- 态三：今天要练 -->
@@ -280,6 +338,7 @@ function goPlans() {
             <div class="actions">
               <el-button v-if="today.sessionFinished" @click="startToday">查看今天的训练</el-button>
               <el-button v-else type="primary" size="large" @click="startToday">开始训练</el-button>
+              <el-button @click="goCustom">再定制一份</el-button>
             </div>
           </div>
         </template>
@@ -337,22 +396,44 @@ function goPlans() {
         />
         <div v-else class="mine-list">
           <div
-            v-for="p in mine"
+            v-for="p in mineSorted"
             :key="p.id"
             class="mine-card"
+            :class="{ 'is-abandoned': p.status === 2 }"
+            :data-plan-id="p.id"
             @click="openPlan(p.id)"
           >
             <div class="mine-main">
               <div class="mine-title">{{ p.title }}</div>
-              <div class="mine-sub">开始于 {{ p.startDate }} · {{ p.statusLabel }}</div>
+              <div class="mine-sub">
+                开始于 {{ p.startDate }} ·
+                <el-tag v-if="p.status === 2" size="small" type="info" effect="plain">
+                  {{ p.statusLabel }}
+                </el-tag>
+                <span v-else>{{ p.statusLabel }}</span>
+              </div>
             </div>
-            <div class="mine-progress">
-              <el-progress
-                :percentage="p.dayCount > 0 ? Math.round((p.finishedDays / p.dayCount) * 100) : 0"
-                :stroke-width="6"
-                :show-text="false"
-              />
-              <span class="progress-text">{{ p.progressText }}</span>
+            <div class="mine-side">
+              <div class="mine-progress">
+                <el-progress
+                  :percentage="p.dayCount > 0 ? Math.round((p.finishedDays / p.dayCount) * 100) : 0"
+                  :stroke-width="6"
+                  :show-text="false"
+                />
+                <span class="progress-text">{{ p.progressText }}</span>
+              </div>
+              <!-- ★ A32：只有"进行中"才给停止入口。已完成 / 已放弃都没有可停的东西，
+                   后端也会拒（已完成），但按钮根本不出现比"点了才报错"更好 -->
+              <el-button
+                v-if="p.status === 0"
+                link
+                type="danger"
+                size="small"
+                :loading="abandoningId === p.id"
+                @click.stop="handleAbandon(p)"
+              >
+                停止执行
+              </el-button>
             </div>
           </div>
         </div>
@@ -582,6 +663,15 @@ function goPlans() {
   border-color: var(--el-color-primary-light-5);
 }
 
+/* 已放弃的计划沉底 + 压暗：它还在列表里（历史要留），但不该抢进行中计划的视觉重量 */
+.mine-card.is-abandoned {
+  opacity: 0.6;
+}
+
+.mine-card.is-abandoned .mine-title {
+  font-weight: 500;
+}
+
 .mine-title {
   font-size: 15px;
   font-weight: 600;
@@ -591,6 +681,14 @@ function goPlans() {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   margin-top: 4px;
+}
+
+.mine-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .mine-progress {
