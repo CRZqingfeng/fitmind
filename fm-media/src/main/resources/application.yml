@@ -155,11 +155,13 @@ logging:
 #        为了读签名有效期而直接注入 MinioProperties，一旦换后端就注入失败、服务起不来。
 fm:
   storage:
-    # ★ 本地不配任何环境变量时走哪一套。想默认走 MinIO 就把 oss 换成 minio。
-    #   ⚠️ 注意两条启动路线**默认值不同**：
-    #     · 脚本（scripts/start-all.sh）显式 `export FM_STORAGE_TYPE="${FM_STORAGE_TYPE:-minio}"` → 默认 minio
-    #     · IDEA（不经过脚本，只能用这里的默认值）→ 默认 oss
-    #   想两边一致，就显式配 `FM_STORAGE_TYPE`（Windows 用户环境变量，IDEA 用；命令行前缀，脚本用）。
+    # ★ 不配任何环境变量时走哪一套：**oss**（项目主用）。
+    #   两个入口现在**一致**了（2026-11-04 M12-1 起）：
+    #     · 脚本（scripts/start-all.sh / start-group.sh）`${FM_STORAGE_TYPE:-oss}`
+    #     · IDEA（不经过脚本，`java -jar`）用这里的默认值 → 也是 oss
+    #   之前两边一个 minio 一个 oss，导致"用脚本起是 MinIO、用 IDEA 起是 OSS"，
+    #   排查时日志和现象完全对不上（M12-1 首轮验收就栽在这上面）。
+    #   离线/断网开发：`FM_STORAGE_TYPE=minio` 显式覆盖。
     type: ${FM_STORAGE_TYPE:oss}
     # ★ **MinIO 的**桶名（OSS 的桶在同级的 fm.oss.bucket，两者刻意不共用 —— 见那里的注释）。
     #   末位保留 MINIO_BUCKET 是为了**向后兼容**旧环境（此前没有任何地方设置过它）。
@@ -168,7 +170,7 @@ fm:
     play-expire: 7200
     preview-expire: 1800
 
-  # ---- MinIO（fm.storage.type=minio 时使用；本地开发默认）----
+  # ---- MinIO（fm.storage.type=minio 时使用；离线开发可选，默认走 OSS）----
   #
   # 凭据一律走环境变量注入（真实值在 docker/.env），不写死进 git。
   # endpoint        —— SDK 内部调用用的地址（服务在宿主机跑，所以用 localhost）

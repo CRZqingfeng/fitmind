@@ -33,13 +33,13 @@ const BASE = process.env.MEDIA_BASE || 'http://localhost:8083';
 /**
  * ★★ 对象存储后端（M9-1 起可插拔：minio / oss，M12-1 两个后端都支持分片）
  *
- *   FM_STORAGE_TYPE=minio node scripts/accept-m12-1.mjs   （默认）
- *   FM_STORAGE_TYPE=oss   node scripts/accept-m12-1.mjs
+ *   默认 **oss**（与 `application.yml` / `scripts/start-*.sh` 的默认值一致，2026-11-04 起）
+ *   FM_STORAGE_TYPE=minio node scripts/accept-m12-1.mjs   （离线开发时）
  *
  * ★ 启动服务时必须与这里一致：用 oss 起服务、用 minio 跑脚本，
  *   第 0 段就会红（而红的原因跟功能一点关系都没有）。
  */
-const STORAGE_TYPE = process.env.FM_STORAGE_TYPE || 'minio';
+const STORAGE_TYPE = process.env.FM_STORAGE_TYPE || 'oss';
 const MINIO = process.env.MINIO_BASE || 'http://localhost:9000';
 const OSS_PUBLIC = process.env.OSS_PUBLIC_ENDPOINT || 'https://itcrz-9527.oss-cn-beijing.aliyuncs.com';
 const USER = process.env.PROBE_USER || '10001';
