@@ -8,6 +8,16 @@ spring:
     name: fm-media
   profiles:
     active: local
+  # ==================== 上传大小限制（M12-1） ====================
+  # ★ Spring Boot 默认单文件 1MB、单请求 10MB，而**一个分片就是 5MiB**（S3 下限），
+  #   不放开会直接 413 / MaxUploadSizeExceededException，且报错发生在进 Controller 之前，
+  #   日志里只看到 "Maximum upload size exceeded"，完全看不出是哪一层的限制。
+  # ★ 为什么只给 8MB 而不是 1GB：一次请求最多只带**一片**。
+  #   放大到 GB 等于给"一个请求把堆塞满"开门 —— 分片上传本身就是为这件事设计的。
+  servlet:
+    multipart:
+      max-file-size: 8MB
+      max-request-size: 8MB
 
 # ==================== 业务配置 ====================
 fm:

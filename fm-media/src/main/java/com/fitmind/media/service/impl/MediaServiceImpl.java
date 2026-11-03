@@ -14,6 +14,7 @@ import com.fitmind.media.domain.query.MediaQuery;
 import com.fitmind.media.domain.vo.MediaVO;
 import com.fitmind.media.domain.vo.PlayUrlVO;
 import com.fitmind.media.enums.FileStatus;
+import com.fitmind.media.mapper.FileObjectMapper;
 import com.fitmind.media.mapper.MediaMapper;
 import com.fitmind.media.service.IMediaService;
 import com.fitmind.media.storage.IFileStorage;
@@ -24,6 +25,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -40,6 +43,9 @@ public class MediaServiceImpl extends ServiceImpl<MediaMapper, Media> implements
 
     private final IMediaStorage mediaStorage;
     private final IFileStorage fileStorage;
+
+    /** M12-1：秒传产生的媒资与别人共享字节，删除时要维护引用计数 */
+    private final FileObjectMapper fileObjectMapper;
 
     /**
      * ★ 与 {@code FileServiceImpl} 同理：只用到"签名有效期"这个与厂商无关的配置，
@@ -167,7 +173,7 @@ public class MediaServiceImpl extends ServiceImpl<MediaMapper, Media> implements
         if (media.getUseTimes() != null && media.getUseTimes() > 0) {
             throw new BizIllegalException(MediaErrorInfo.Msg.MEDIA_IN_USE);
         }
-        mediaStorage.deleteFile(media.getFileId());
+        releaseObject(media);
         removeById(id);
     }
 
@@ -186,8 +192,42 @@ public class MediaServiceImpl extends ServiceImpl<MediaMapper, Media> implements
         if (inUse) {
             throw new BizIllegalException(MediaErrorInfo.Msg.MEDIA_IN_USE);
         }
-        mediaStorage.deleteFiles(list.stream().map(Media::getFileId).toList());
+        // ★ 逐条按引用计数释放，不能像以前那样"把 keys 一起删掉"：
+        //   秒传产生的两条媒资共用一个 key，批量删会把别人的视频一起删了。
+        list.forEach(this::releaseObject);
         removeByIds(ids);
+    }
+
+    /**
+     * 释放一条媒资占用的物理对象。
+     *
+     * <p>老数据（{@code objectId} 为空）：key 独占，直接删对象。</p>
+     * <p>M12-1 之后：先减引用，归零才删行、删行成功才删字节 ——
+     * 顺序与理由见 {@code FileServiceImpl#deleteFileById} 的注释。</p>
+     */
+    private void releaseObject(Media media) {
+        if (media.getObjectId() == null) {
+            mediaStorage.deleteFile(media.getFileId());
+            return;
+        }
+        int affected = fileObjectMapper.decreaseRef(media.getObjectId());
+        if (affected == 0) {
+            log.warn("物理对象 {} 的引用计数已为 0，跳过递减（可能是重复删除）", media.getObjectId());
+        } else if (fileObjectMapper.deleteIfUnused(media.getObjectId()) > 0) {
+            // ★ 事务里不做网络 IO：提交成功后再删字节（理由见 FileServiceImpl#deleteObjectAfterCommit）
+            if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                String key = media.getFileId();
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        mediaStorage.deleteFile(key);
+                    }
+                });
+            } else {
+                mediaStorage.deleteFile(media.getFileId());
+            }
+            log.info("物理对象 {} 已无引用，删除视频对象 {}", media.getObjectId(), media.getFileId());
+        }
     }
 
     @Override

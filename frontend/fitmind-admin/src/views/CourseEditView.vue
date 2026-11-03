@@ -19,13 +19,14 @@ import {
   saveCourseTeachers,
   upShelf,
 } from '@/api/course'
-import { applyUploadSignature, confirmUpload, uploadFile } from '@/api/media'
+import { confirmUpload, uploadFile } from '@/api/media'
 import { getSubjectPage } from '@/api/subject'
 import { findUserIdByPhone, getCoaches } from '@/api/user'
 import type { CategoryVO, CourseTeacherVO, SubjectVO } from '@/types/admin'
 import { ACTION_TYPE_OPTIONS, DIFFICULTY_OPTIONS, SUBJECT_TYPE_OPTIONS } from '@/types/admin'
 import { formatDuration } from '@/utils/format'
-import { guessMime, putToMinio, readVideoDuration } from '@/utils/media-upload'
+import { readVideoDuration } from '@/utils/media-upload'
+import { uploadResumable } from '@/utils/chunk-upload'
 import { ApiError } from '@/utils/request'
 
 /**
@@ -366,30 +367,32 @@ async function loadCatas() {
 }
 
 /**
- * 给某个动作上传训练视频（**预签名三步**：申请签名 → 直传 MinIO → confirm）。
+ * 给某个动作上传训练视频（**M12-1 起改为分片上传**：init → 逐片 PUT → complete）。
  *
- * ★ 视频与封面走的是**两条不同链路**：封面小、走服务端中转（`/ms/files`），
- *   视频大、走预签名直传（`/ms/medias/*`）。后端 `FileController` 的类注释写明了这个分工。
- * ★ 直传必须带 `Content-Type`（见 `utils/media-upload.ts` 的 `putToMinio` 注释）。
+ * ★ 为什么换：课程视频动辄上百 MB，一次 PUT 在弱网下失败率高，且失败即从头再来。
+ *   分片后失败只是"少几片"，重传会跳过已传的分片，同内容还能秒传命中。
+ * ★ 视频落 `media/` 前缀（私有，播放必须签名）；封面仍走 `/ms/files` 服务端中转。
+ * ★ 合并出 media 记录后再调一次 `confirmUpload` —— 它负责把**时长**写进库，
+ *   分片上传本身不读视频元数据。
  */
 async function handleVideoChange(e: Event, row: ActionRow) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = ''
   if (!file) return
-  const { mime } = guessMime(file.name)
   row.uploading = true
   row.percent = 0
   try {
-    const sig = await applyUploadSignature(file.name, file.size)
-    if (!sig?.uploadUrl) throw new Error('没拿到上传地址')
-    // ★★ 优先用后端回传的 contentType（OSS 的 V4 签名把它算进去了，必须原样带）。
-    //    ⚠️ 原来这里是 `file.type || mime` —— 但 OSS 模式下签名用的是"按扩展名算"的值，
-    //    而 `file.type` 由浏览器给、多环境下可能不同，两者不一致就是 403 SignatureDoesNotMatch。
-    await putToMinio(sig.uploadUrl, file, sig.contentType || file.type || mime, (p) => (row.percent = p))
+    const result = await uploadResumable(file, {
+      bizType: 'media',
+      target: 'media',
+      onProgress: (p) => (row.percent = p),
+    })
+    const mediaId = result.mediaId
+    if (!mediaId) throw new Error('上传完成但没有返回媒资 id')
     const duration = await readVideoDuration(file)
-    await confirmUpload(sig.mediaId, { duration })
-    row.mediaId = String(sig.mediaId)
+    await confirmUpload(mediaId, { duration })
+    row.mediaId = String(mediaId)
     row.videoName = file.name
     row.mediaDuration = duration || row.mediaDuration
     ElMessage.success(`「${row.name}」视频已上传（${formatDuration(row.mediaDuration)}）`)

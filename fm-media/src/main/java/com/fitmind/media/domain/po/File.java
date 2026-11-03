@@ -46,6 +46,22 @@ public class File implements Serializable {
     /** 不带签名的访问地址（管理端展示用） */
     private String url;
 
+    /**
+     * 文件内容 SHA-256（M12-1 秒传用）。
+     *
+     * <p>老数据（走一次性上传的）为 {@code null}，不参与秒传判定 ——
+     * 不要试图"回填"：回填要重新读一遍所有对象，代价远大于收益。</p>
+     */
+    private String fileHash;
+
+    /**
+     * 引用的物理对象 id（{@code file_object.id}）。
+     *
+     * <p>★ 非空表示这条记录与别人共享同一份字节，删除时必须走引用计数；
+     * 为空表示老数据，key 是它独占的，可以直接删对象。</p>
+     */
+    private Long objectId;
+
     /** 文件大小，单位字节 */
     private Long size;
 
