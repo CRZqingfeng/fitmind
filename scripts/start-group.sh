@@ -36,7 +36,8 @@ export MINIO_ACCESS_KEY="$(env_get MINIO_ROOT_USER)"
 export MINIO_SECRET_KEY="$(env_get MINIO_ROOT_PASSWORD)"
 
 # ==================== M9-1 对象存储可插拔（minio / oss 二选一） ====================
-# 切换：`FM_STORAGE_TYPE=oss bash scripts/start-group.sh fm-media`
+# 默认 **oss**（2026-11-04 M12-1 起，与 application.yml 的默认值对齐）。
+# 切 MinIO（离线开发）：`FM_STORAGE_TYPE=minio bash scripts/start-group.sh fm-media`
 #
 # ⚠️ 这里**只在取值非空时才 export**（见 export_if_set）：
 #   环境变量一旦存在（哪怕是空串）就会**覆盖掉 yml 里的默认值**，
@@ -47,7 +48,7 @@ export_if_set() {
     [ -n "$v" ] && export "$1=$v"
     return 0
 }
-export FM_STORAGE_TYPE="${FM_STORAGE_TYPE:-minio}"
+export FM_STORAGE_TYPE="${FM_STORAGE_TYPE:-oss}"
 if [ "$FM_STORAGE_TYPE" = "oss" ]; then
     # 桶名：注入 **OSS_BUCKET**（不要改名成 FM_STORAGE_BUCKET）。
     #   fm.oss.bucket 读的就是 OSS_BUCKET；而 FM_STORAGE_BUCKET 是 **MinIO** 的键，

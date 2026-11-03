@@ -48,7 +48,11 @@ export_if_set() {
     [ -n "$v" ] && export "$1=$v"
     return 0
 }
-export FM_STORAGE_TYPE="${FM_STORAGE_TYPE:-minio}"
+# ★ 默认 **oss**（2026-11-04 M12-1 起；此前默认 minio）。
+#   理由：项目主用 OSS，而 yml 的默认值也是 oss —— 两个入口默认一致，
+#   才不会再出现"用脚本起是 MinIO、用 IDEA 起是 OSS，排查时全对不上"。
+#   想离线开发（断网、或不想烧流量）：命令行前缀 `FM_STORAGE_TYPE=minio bash scripts/start-all.sh`。
+export FM_STORAGE_TYPE="${FM_STORAGE_TYPE:-oss}"
 if [ "$FM_STORAGE_TYPE" = "oss" ]; then
     # 桶名：注入 **OSS_BUCKET**（不要改名成 FM_STORAGE_BUCKET）。
     #   fm.oss.bucket 读的就是 OSS_BUCKET；而 FM_STORAGE_BUCKET 是 **MinIO** 的键，
