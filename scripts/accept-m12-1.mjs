@@ -30,7 +30,18 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 const BASE = process.env.MEDIA_BASE || 'http://localhost:8083';
+/**
+ * ★★ 对象存储后端（M9-1 起可插拔：minio / oss，M12-1 两个后端都支持分片）
+ *
+ *   FM_STORAGE_TYPE=minio node scripts/accept-m12-1.mjs   （默认）
+ *   FM_STORAGE_TYPE=oss   node scripts/accept-m12-1.mjs
+ *
+ * ★ 启动服务时必须与这里一致：用 oss 起服务、用 minio 跑脚本，
+ *   第 0 段就会红（而红的原因跟功能一点关系都没有）。
+ */
+const STORAGE_TYPE = process.env.FM_STORAGE_TYPE || 'minio';
 const MINIO = process.env.MINIO_BASE || 'http://localhost:9000';
+const OSS_PUBLIC = process.env.OSS_PUBLIC_ENDPOINT || 'https://itcrz-9527.oss-cn-beijing.aliyuncs.com';
 const USER = process.env.PROBE_USER || '10001';
 const OTHER_USER = '10099';
 const CHUNK = 5 * 1024 * 1024;
@@ -144,12 +155,18 @@ async function main() {
   console.log('========================================');
   console.log(' FitMind M12-1 断点续传 + 秒传 —— 端到端验收');
   console.log('========================================');
-  console.log(`服务：${BASE}   MinIO：${MINIO}   探针用户：${USER}`);
+  console.log(`服务：${BASE}   存储后端：${STORAGE_TYPE}   探针用户：${USER}`);
 
   // ==================== 0. 环境 ====================
   section('0. 环境');
-  const live = await fetch(`${MINIO}/minio/health/live`).then((r) => r.status).catch(() => 0);
-  check('MinIO 健康检查通过', live === 200, `HTTP ${live}`);
+  if (STORAGE_TYPE === 'oss') {
+    // OSS 没有"存活"概念（托管服务）；匿名列桶返回 403 = 服务可达 + 权限在生效
+    const r = await fetch(`${OSS_PUBLIC}/`).then((x) => x.status).catch(() => 0);
+    check('OSS 端点可达且匿名列桶被拒绝（403）', r === 403, `HTTP ${r} ← ${OSS_PUBLIC}`);
+  } else {
+    const live = await fetch(`${MINIO}/minio/health/live`).then((r) => r.status).catch(() => 0);
+    check('MinIO 健康检查通过', live === 200, `HTTP ${live}`);
+  }
 
   // ==================== 1. 老路径不能坏（A1） ====================
   section('1. 老的一次性上传（回归 A1）');
@@ -360,6 +377,15 @@ async function main() {
   check('★ 播放地址能真的下载到视频且内容一致',
     playDl.status === 200 && (await sha256(playDl.buffer)) === hashC,
     `status=${playDl.status} bytes=${playDl.buffer.length}/${fileC.all.length}`);
+
+  /**
+   * ★★ 视频必须"只有签名能看"：`media/` 前缀在桶策略里是**拒绝匿名读**的。
+   * 这条断言对两个后端都成立，而且它防的是一类**看起来功能全好**的事故：
+   * 桶策略一放开，功能测试全绿，付费视频却能被任何人直接下载。
+   */
+  const rawVideo = await fetchObject(mediaFile?.rawUrl);
+  check('★★ 视频直链（无签名）被拒绝 403（media/ 前缀不允许匿名读）',
+    rawVideo.status === 403, `status=${rawVideo.status} ← ${String(mediaFile?.rawUrl).slice(0, 70)}`);
 
   const instantC = await api('POST', '/files/uploads', {
     json: { hash: hashC, filename: '同一段考核视频.mp4', size: fileC.all.length, bizType: 'media', target: 'media' },
