@@ -1,5 +1,6 @@
 import { http } from '@/utils/request'
-import { guessMime, putToMinio, readVideoDuration, type UploadSignature } from '@/utils/upload'
+import { readVideoDuration, type UploadSignature } from '@/utils/upload'
+import { uploadResumable } from '@/utils/chunk-upload'
 
 /**
  * 媒资接口（fm-media，网关前缀 `/ms`）
@@ -79,26 +80,40 @@ export async function uploadMedia(
 ): Promise<string> {
   const { onStage, onProgress } = options
 
-  onStage?.('① 申请上传签名…')
-  const sig = await applyUploadSignature(file.name, file.size)
-  if (!sig?.uploadUrl) throw new Error('没拿到上传地址')
-
-  onStage?.('② 上传视频…')
   /**
-   * ★★ Content-Type 的取值优先级（M9-1）：
-   *   ① `sig.contentType` —— 后端签名时用的那个值。OSS（V4）把 Content-Type 纳入签名，
-   *      前端**必须原样带上**，否则 403 SignatureDoesNotMatch。这是唯一可靠的来源。
-   *   ② 兜底：`file.type`（浏览器给的）→ 再兜底按扩展名猜。
-   *      只有 MinIO 模式（后端不回传 contentType）才会走到这里，行为与改造前一致。
+   * ★★ M12-1 起改走「分片上传」（`utils/chunk-upload.ts`）：
+   *
+   *   老链路 = 一次 PUT 传完整个视频。200MB 的考核视频在弱网下几乎必然失败，
+   *   而且失败就是**从 0 开始**（学员在地铁里传了 8 分钟，切换一次网络就白费）。
+   *   新链路的失败只是"少了几片"，重进页面时会问服务端还缺哪几片，接着传。
+   *
+   *   同时白拿一个能力：同内容的文件第二次上传会被**秒传**命中（不传字节）。
+   *
+   *   ⚠️ `applyUploadSignature` / `putToMinio` 仍然保留 ——
+   *      管理端的课程视频上传还在用那条链路（两端是独立打包的两个应用，改一端不影响另一端）。
+   *      统一它们是下一步（见 docs/待修复问题清单.md）。
    */
-  const mime = sig.contentType || file.type || guessMime(file.name)
-  await putToMinio(sig.uploadUrl, file, mime, (p) => onProgress?.(p))
+  const result = await uploadResumable(file, {
+    // 视频落在 media/ 前缀（私有：mp4 不允许匿名读，播放必须签名）
+    bizType: 'media',
+    // ★ 产出 media 记录，调用方拿到的还是原来那个 mediaId，接口形状不变
+    target: 'media',
+    onStage,
+    onProgress,
+  })
 
-  onStage?.('③ 读取时长并确认…')
+  const mediaId = result.mediaId
+  if (!mediaId) throw new Error('上传完成但没有返回媒资 id')
+
+  /**
+   * ★ 还要再调一次老接口：它负责把**时长**写进库（分片上传本身不读视频元数据）。
+   *   它同时也是"服务端向对象存储核实大小"的那道校验，重复调用是幂等的。
+   */
+  onStage?.('④ 读取时长并确认…')
   const duration = await readVideoDuration(file)
-  await confirmUpload(sig.mediaId, { duration })
+  await confirmUpload(mediaId, { duration })
 
-  return String(sig.mediaId)
+  return String(mediaId)
 }
 
 // ============================================================

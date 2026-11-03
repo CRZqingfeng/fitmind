@@ -35,6 +35,13 @@ public class Media implements Serializable {
     /** 对象存储 key，如 {@code media/2026/09/uuid.mp4} */
     private String fileId;
 
+    /**
+     * 引用的物理对象 id（M12-1 秒传；老数据为 null）。
+     *
+     * <p>非空说明这条媒资与别人共享同一份视频字节，删除时必须走引用计数。</p>
+     */
+    private Long objectId;
+
     /** 视频原始文件名 */
     private String filename;
 

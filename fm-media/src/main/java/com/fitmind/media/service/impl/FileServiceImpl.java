@@ -9,12 +9,16 @@ import com.fitmind.media.domain.po.File;
 import com.fitmind.media.enums.BizType;
 import com.fitmind.media.enums.FileStatus;
 import com.fitmind.media.mapper.FileMapper;
+import com.fitmind.media.mapper.FileObjectMapper;
 import com.fitmind.media.service.IFileService;
 import com.fitmind.media.storage.IFileStorage;
 import com.fitmind.media.storage.StorageProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -32,6 +36,9 @@ import java.util.UUID;
 public class FileServiceImpl extends ServiceImpl<FileMapper, File> implements IFileService {
 
     private final IFileStorage fileStorage;
+
+    /** M12-1：删除共享物理对象时要维护引用计数 */
+    private final FileObjectMapper fileObjectMapper;
 
     /**
      * ★ 注意这里注入的是 {@link StorageProperties}（通用）而不是 MinioProperties（厂商专属）——
@@ -104,13 +111,67 @@ public class FileServiceImpl extends ServiceImpl<FileMapper, File> implements IF
     }
 
     @Override
+    @Transactional
     public void deleteFileById(Long id) {
         File po = getById(id);
         if (po == null) {
             return;
         }
-        fileStorage.deleteFile(po.getKey());
+        if (po.getObjectId() == null) {
+            // 老数据（M12-1 之前上传）：key 是这条记录独占的，直接删对象
+            fileStorage.deleteFile(po.getKey());
+        } else {
+            /**
+             * ★★ 共享物理对象：不能直接删字节。
+             *
+             * <p>秒传产生的多条 file 记录指向同一个 key，直接删对象会让别人的文件凭空消失。
+             * 正确顺序是「先减引用 → 归零才删行 → 删行成功才删字节」：</p>
+             * <ul>
+             *   <li>减引用带 {@code ref_count > 0} 条件，并发删除不会减成负数；</li>
+             *   <li>删行带 {@code ref_count <= 0} 条件，让"能不能删"由数据库当次的值决定；</li>
+             *   <li>先删行再删字节 —— 反过来会出现"引用还加得上、但字节已经没了"的鬼记录。</li>
+             * </ul>
+             * <p>代价：删行成功后删字节失败会留下孤儿对象。这是**有意接受**的方向 ——
+             * 孤儿只浪费存储，反方向则是数据丢失。</p>
+             */
+            int affected = fileObjectMapper.decreaseRef(po.getObjectId());
+            if (affected == 0) {
+                log.warn("物理对象 {} 的引用计数已为 0，跳过递减（可能是重复删除）", po.getObjectId());
+            } else if (fileObjectMapper.deleteIfUnused(po.getObjectId()) > 0) {
+                deleteObjectAfterCommit(po.getKey());
+                log.info("物理对象 {} 已无引用，删除对象 {}", po.getObjectId(), po.getKey());
+            }
+        }
         removeById(id);
+    }
+
+    /**
+     * 把「删对象存储」推迟到事务提交之后。
+     *
+     * <p><b>为什么不直接删：</b>这是一个 {@code @Transactional} 方法，直接在里面发 HTTP，
+     * 会做两件不该做的事 ——</p>
+     * <ol>
+     *   <li><b>占着数据库连接做网络 IO</b>。对象存储慢 3 秒，数据库连接就被占 3 秒；
+     *       高并发下连接池会被"等对象存储"的请求占满，表现为**全站变慢**，
+     *       而慢的根因完全不在数据库上。</li>
+     *   <li><b>删了字节却回滚了数据库</b>：对象删除无法回滚，一旦后续 SQL 失败，
+     *       库里留下一条指向"已经不存在的对象"的记录。</li>
+     * </ol>
+     * <p>放到 afterCommit 之后：事务成功才删字节，失败就当没发生过。
+     * 代价是"提交成功但删字节失败"会留孤儿对象 —— 这个方向是**有意选的**，
+     * 孤儿只浪费存储，反方向是数据丢失（由桶的生命周期规则兜底回收）。</p>
+     */
+    private void deleteObjectAfterCommit(String key) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    fileStorage.deleteFile(key);
+                }
+            });
+        } else {
+            fileStorage.deleteFile(key);
+        }
     }
 
     /**

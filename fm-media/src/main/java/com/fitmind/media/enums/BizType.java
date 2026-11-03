@@ -29,6 +29,15 @@ public enum BizType implements IEnum<String> {
     /** 视频封面 */
     MEDIA_COVER("media-cover", "media-cover/"),
 
+    /**
+     * 训练视频（M12-1 新增，供分片上传 target=media 使用）。
+     *
+     * <p>★ 与 `media-cover` 是两个前缀：视频本体在 `media/`，封面在 `media-cover/`。
+     * 桶策略对 `media/` 下的 **mp4 拒绝匿名读**（付费内容），只对图片放行 ——
+     * 所以这个前缀是"私有"的（见 {@link #isPublicRead()}）。</p>
+     */
+    MEDIA("media", "media/"),
+
     /** 通用（兜底） */
     COMMON("common", "common/"),
     ;
@@ -46,6 +55,25 @@ public enum BizType implements IEnum<String> {
     @Override
     public String getValue() {
         return value;
+    }
+
+    /**
+     * 该业务前缀是否「公开可读」—— 决定秒传能不能跨用户命中。
+     *
+     * <p><b>为什么需要这个判断：</b>秒传只要知道 hash 就能拿到文件。
+     * 对本来就是匿名可读的前缀（桶策略里的 5 个白名单前缀）这不构成泄露；
+     * 但对「只有本人能看」的前缀，等于把"知道 hash"变成了"拿到别人的文件"。</p>
+     *
+     * <p>★★ <b>新增业务前缀时必须同时想清楚这一条</b>：如果它是私有的，
+     * 在这里显式返回 {@code false}。写成 switch 表达式而不是返回常量 true，
+     * 就是为了让"新加枚举值"直接在编译期报错，而不是悄悄继承一个放行规则。</p>
+     */
+    public boolean isPublicRead() {
+        return switch (this) {
+            case AVATAR, COURSE_COVER, ACTION_COVER, MEDIA_COVER, COMMON -> true;
+            // ★ 视频本体必须签名才能播：允许跨用户秒传 = 知道 hash 就能拿到付费视频
+            case MEDIA -> false;
+        };
     }
 
     public static BizType of(String value) {
