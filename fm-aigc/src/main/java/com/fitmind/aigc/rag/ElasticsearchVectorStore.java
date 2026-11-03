@@ -363,9 +363,12 @@ public class ElasticsearchVectorStore implements VectorStore {
         try {
             BoolQueryBuilder bool = QueryBuilders.boolQuery();
             MatchQueryBuilder match = QueryBuilders.matchQuery(FIELD_CONTENT, query)
-                    // 整句提问按 AND 匹配几乎必然为空（口语化问题里总有不在语料里的词），
-                    // 60% 是"召回有保障 + 不至于全是不相关项"之间的折中
-                    .minimumShouldMatch("60%");
+                    // ★ 2026-11-04 由 60% 降到 30%：语料从 1.4 万字扩到 4.3 万字后，
+                    //   "整句 60% 的词都能匹配上"变得几乎不可能 —— 实测 27 题里有 6 题
+                    //   关键词路直接 0 召回，混合检索退化成纯向量。
+                    //   30% 是"至少命中几个实词"的量级：既保留精确术语（臀桥/RPE 8）的召回价值，
+                    //   又不至于让长句提问颗粒无收。
+                    .minimumShouldMatch("30%");
             bool.must(match);
             if (filter != null) {
                 bool.filter(toEsQuery(filter));

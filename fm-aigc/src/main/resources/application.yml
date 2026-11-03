@@ -139,11 +139,21 @@ fm:
       top-k: ${AIGC_RAG_TOP_K:4}
       # ★ 低于阈值的结果不送进 prompt —— 宁可拒答，不要基于不相关内容硬编
       similarity-threshold: ${AIGC_RAG_THRESHOLD:0.55}
-      # ★ 关键词 + 向量混合检索（ES 同时是全文检索引擎，这是选它的额外收益）
+      # ★ 关键词 + 向量混合检索（ES 同时是全文检索引擎，这是它的额外收益）
       hybrid: ${AIGC_RAG_HYBRID:true}
       keyword-top-k: 6
       # 向量一路先多召回一些，融合后裁到 top-k（否则融合完可能不够条数）
       vector-top-k: 8
+
+      # ---- 重排（2026-11-04 新增）----
+      # ★ RRF 只看名次，不知道"这块能不能答上问题"。语料扩到 4.3 万字后，
+      #   上下文精度从 0.89 掉到 0.75，而 docId 命中率仍是 100% —— 说明问题在排序，不在召回。
+      #   失败自动降级为 RRF 顺序，不阻塞检索（见 Reranker）。
+      rerank-enabled: ${AIGC_RAG_RERANK:true}
+      rerank-model: ${AIGC_RAG_RERANK_MODEL:gte-rerank-v2}
+      rerank-url: ${AIGC_RAG_RERANK_URL:https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank}
+      # 它排在用户等待路径上：超时宁可降级，也不要多等
+      rerank-timeout-ms: ${AIGC_RAG_RERANK_TIMEOUT:2500}
 
       # 分块：中文按字符切比按 token 切更贴合真实长度
       chunk-size: 600

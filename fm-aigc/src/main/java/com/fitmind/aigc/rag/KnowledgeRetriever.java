@@ -13,7 +13,9 @@ import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 知识检索器 —— RAG 的"取"这一半。
@@ -42,9 +44,23 @@ import java.util.List;
 @RequiredArgsConstructor
 public class KnowledgeRetriever {
 
+    /**
+     * 同一篇文档最多占用 topK 的几条。
+     *
+     * <p>★★ <b>为什么是 3 而不是 2</b>（2026-11-04 实测修正）：先按 2 试过，
+     * 结果"列举型问题"的召回直接崩了 —— 例如"新手最容易犯哪些错误"，
+     * 六个错误分布在同一篇文档的多个连续小节里，配额 2 只让进两条，
+     * 上下文召回从 0.62 掉到 0.14。<b>长文档里的答案是"铺开"的，配额砍的是召回。</b></p>
+     *
+     * <p>3 是折中：topK=4 时最多 3 条同文档，仍强制至少留一个名额给别的文档
+     * （避免"一篇文档刷满四条"），又不至于把铺开的答案砍断。</p>
+     */
+    private static final int MAX_CHUNKS_PER_DOC = 3;
+
     private final ElasticsearchVectorStore vectorStore;
     private final AigcProperties props;
     private final KnowledgeIndexManager indexManager;
+    private final Reranker reranker;
 
     /**
      * 执行一次检索。
@@ -111,12 +127,24 @@ public class KnowledgeRetriever {
                 keywordHits = vectorStore.keywordSearch(question, keywordTopK, filter);
             }
             // 5. RRF 融合
+            // ★ 刻意多留一倍（topK*2）再挑：如果这里就裁到 topK，
+            //   下一步的"每篇文档配额"就没有挑选余地 —— 在 4 条候选里做配额，
+            //   结果往往只是"少给几条"，而不是"把另一篇更该给的换进来"。
+            int fuseLimit = Math.max(topK * 2, topK + 2);
             List<Document> fused = hybrid
-                    ? ElasticsearchVectorStore.fuseByRrf(List.of(vectorHits, keywordHits), topK)
+                    ? ElasticsearchVectorStore.fuseByRrf(List.of(vectorHits, keywordHits), fuseLimit)
                     : vectorHits;
 
-            //6.成本护栏 + 轨迹记录
-            List<Document> injected = truncate(fused, rag.getMaxContextChars());
+            // 6. 重排：RRF 只看名次，cross-encoder 看"这块能不能答上这个问题"
+            //    ★ 放在配额筛选之前：先让"答得上的"排到前面，再限制单文档名额，
+            //      否则配额会先把好块挤掉。重排失败时会原样返回（降级不报错）。
+            List<Document> reranked = reranker.rerank(question, fused);
+
+            // 7. 多样性筛选：同文档配额 + 相邻块去重
+            List<Document> diversified = diversify(reranked, topK);
+
+            //8.成本护栏 + 轨迹记录
+            List<Document> injected = truncate(diversified, rag.getMaxContextChars());
             long cost = System.currentTimeMillis() - start;
             trace.record(toSources(injected), vectorHits.size() + keywordHits.size(), injected.size(),
                     injected.stream().mapToInt(d -> d.getText().length()).sum(), cost, hybrid);
@@ -165,6 +193,50 @@ public class KnowledgeRetriever {
      * "进 prompt 的内容"会悄悄膨胀，而症状是"某天开始 AI 回答变慢变贵"。
      * 有个硬上限，最坏情况就是"少了两条依据"，而不是"账单翻十倍"。</p>
      */
+    /**
+     * 多样性筛选：同一篇文档最多 {@value #MAX_CHUNKS_PER_DOC} 条。
+     *
+     * <p><b>为什么需要它</b>：实测（2026-11-04，语料 4.3 万字 / 155 块）27 题里有 9 题
+     * 的四条来源全部来自同一篇文档 —— 等于把同一段话给模型看了三遍，
+     * 另外几篇更该给的反而挤不进来。</p>
+     *
+     * <p>★★ <b>踩过的坑（不要重犯）</b>：最初版本还加了"相邻 chunk 只留一条"
+     * （理由是 120 字重叠），结果列举型问题召回暴跌 ——
+     * "六个错误""三种做法"这类答案本来就铺在连续小节里，相邻去重等于把它们砍断。
+     * <b>120 字重叠占 600 字块的 20%，属于正常上下文衔接，不是冗余。</b>
+     * 真正的冗余由配额拦住就够了，不需要动相邻块。</p>
+     *
+     * <p><b>兜底</b>：若配额导致挑不满，用剩余候选按原顺序补足 ——
+     * 宁可多给一条同文档的，也不要少给一条依据（召回比纯度更伤）。</p>
+     */
+    private List<Document> diversify(List<Document> fused, int limit) {
+        Map<String, Integer> perDoc = new HashMap<>();
+        List<Document> picked = new ArrayList<>();
+        List<Document> overflow = new ArrayList<>();
+
+        for (Document doc : fused) {
+            String docId = str(doc.getMetadata().get(AigcConstants.META_DOC_ID));
+            int count = perDoc.getOrDefault(docId, 0);
+            if (count < MAX_CHUNKS_PER_DOC) {
+                picked.add(doc);
+                perDoc.put(docId, count + 1);
+                if (picked.size() >= limit) {
+                    return picked;
+                }
+            } else {
+                overflow.add(doc);
+            }
+        }
+
+        for (Document doc : overflow) {
+            if (picked.size() >= limit) {
+                break;
+            }
+            picked.add(doc);
+        }
+        return picked;
+    }
+
     private List<Document> truncate(List<Document> docs, int maxChars) {
         List<Document> result = new ArrayList<>();
         int used = 0;

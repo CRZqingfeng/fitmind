@@ -41,6 +41,11 @@ const VECTOR_TOPK = 8;
 const KEYWORD_TOPK = 6;
 const THRESHOLD = 0.55;
 const RRF_K = 60;
+const MAX_PER_DOC = 3;   // 同一篇文档最多占 topK 的几条（与 KnowledgeRetriever 一致）
+const FUSE_LIMIT = Math.max(TOP_K * 2, TOP_K + 2);  // 融合先多留一倍，再挑
+const RERANK_ENABLED = !process.argv.includes('--no-rerank');
+const RERANK_MODEL = 'gte-rerank-v2';
+const RERANK_URL = 'https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank';
 
 const args = process.argv.slice(2);
 const val = (n) => args.find((a) => a.startsWith(`--${n}=`))?.split('=')[1];
@@ -112,6 +117,8 @@ async function esSearch(payload, label) {
     id: h._id,
     doc: h._source.doc_id,
     section: h._source.section,
+    chunkIndex: h._source.chunk_index ?? -1,
+    text: h._source.content || '',
     score: label === '向量' ? h._score - 1.0 : h._score, // 向量路 ES 侧 +1 过，这里还原
   }));
 }
@@ -119,7 +126,7 @@ async function esSearch(payload, label) {
 async function vectorSearch(q, goal) {
   return esSearch({
     size: VECTOR_TOPK,
-    _source: ['doc_id', 'title', 'section'],
+    _source: ['doc_id', 'title', 'section', 'chunk_index', 'content'],
     min_score: THRESHOLD + 1.0,
     query: {
       script_score: {
@@ -136,10 +143,10 @@ async function vectorSearch(q, goal) {
 async function keywordSearch(q, goal) {
   return esSearch({
     size: KEYWORD_TOPK,
-    _source: ['doc_id', 'title', 'section'],
+    _source: ['doc_id', 'title', 'section', 'chunk_index', 'content'],
     query: {
       bool: {
-        must: [{ match: { content: { query: q, minimum_should_match: '60%' } } }],
+        must: [{ match: { content: { query: q, minimum_should_match: '30%' } } }],
         filter: [goalFilter(goal)],
       },
     },
@@ -160,6 +167,61 @@ function rrf(lists, k = TOP_K) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, k)
     .map(([id, rrfScore]) => ({ ...docs.get(id), rrf: Number(rrfScore.toFixed(4)) }));
+}
+
+/** 重排：与 Reranker.java 对应。失败/关闭时原样返回（降级为 RRF 顺序） */
+async function rerank(query, docs) {
+  if (!RERANK_ENABLED || docs.length <= 1) return docs;
+  try {
+    const res = await fetch(RERANK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DS_KEY}` },
+      body: JSON.stringify({
+        model: RERANK_MODEL,
+        input: { query, documents: docs.map((d) => (d.text || '').slice(0, 1200)) },
+        parameters: { return_documents: false, top_n: docs.length },
+      }),
+    });
+    if (!res.ok) return docs;
+    const json = await res.json();
+    const results = json?.output?.results || [];
+    const sorted = results
+      .map((r) => (docs[r.index] ? { ...docs[r.index], rerank: r.relevance_score } : null))
+      .filter(Boolean);
+    return sorted.length ? sorted : docs;
+  } catch {
+    return docs;
+  }
+}
+
+/**
+ * 多样性筛选：同一篇文档最多 MAX_PER_DOC 条。
+ * 与 KnowledgeRetriever.diversify 逐行对应 —— 这里的逻辑一旦和 Java 不一致，
+ * 测出来的就不是线上那条路。
+ * ⚠️ 不要加"相邻 chunk 只留一条"：列举型问题（六个错误/三种做法）的答案
+ *    本来就铺在连续小节里，相邻去重会把它们砍断，召回会崩。
+ */
+function diversify(fused, limit) {
+  const perDoc = new Map();
+  const picked = [];
+  const overflow = [];
+
+  for (const item of fused) {
+    const count = perDoc.get(item.doc) || 0;
+    if (count < MAX_PER_DOC) {
+      picked.push(item);
+      perDoc.set(item.doc, count + 1);
+      if (picked.length >= limit) return picked;
+    } else {
+      overflow.push(item);
+    }
+  }
+  // 配额导致挑不满：用剩余补足（宁可多给同文档一条，也不要少给依据）
+  for (const item of overflow) {
+    if (picked.length >= limit) break;
+    picked.push(item);
+  }
+  return picked;
 }
 
 async function main() {
@@ -185,8 +247,10 @@ async function main() {
   for (const [i, [q, expect, goal]] of items.entries()) {
     const t = Date.now();
     const [v, k] = await Promise.all([vectorSearch(q, goal), keywordSearch(q, goal)]);
-    const fused = rrf([v, k]);
-    const docs = fused.map((d) => d.doc);
+    const fused = rrf([v, k], FUSE_LIMIT);
+    const reranked = await rerank(q, fused);
+    const picked = diversify(reranked, TOP_K);
+    const docs = picked.map((d) => d.doc);
     const hit = docs.includes(expect);
     const unique = new Set(docs).size;
     rows.push({ idx: i + 1, q, expect, goal, docs, hit, vectorHits: v.length, keywordHits: k.length, unique, ms: Date.now() - t });
@@ -208,9 +272,11 @@ async function main() {
   console.log('\n' + '='.repeat(70));
   console.log(`  检索命中率            ${hitCount}/${n} = ${(hitCount / n * 100).toFixed(1)}%`);
   console.log(`  平均来源篇数          ${avgUnique.toFixed(1)} 篇（同文档占满 topK：${sameDoc} 题）`);
-  console.log(`  关键词路 0 召回       ${kwEmpty}/${n} 题（minimum_should_match 60% 在长句上偏严）`);
+  console.log(`  关键词路 0 召回       ${kwEmpty}/${n} 题（30% 匹配；改前用 60% 时是 6/27）`);
   console.log(`  平均单题耗时          ${avgMs.toFixed(0)} ms`);
-  console.log(`  本次成本              约 ${(n * 20 * 0.0005 / 1000).toFixed(4)} 元（${n} 次 embedding）`);
+  const embCost = n * 20 * 0.0005 / 1000;
+  const rerankCost = RERANK_ENABLED ? n * 0.005 : 0;
+  console.log(`  本次成本              约 ${(embCost + rerankCost).toFixed(4)} 元（${n} 次 embedding${RERANK_ENABLED ? ` + ${n} 次重排` : '，已关重排'}）`);
 
   if (VERIFY && Object.keys(real).length) {
     const jac = [];

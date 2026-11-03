@@ -444,6 +444,28 @@ public class AigcProperties {
         private int vectorTopK = 8;
 
         /**
+         * 是否开启重排（cross-encoder）。
+         *
+         * <p>★★ <b>RRF 只看"名次"，不看"这块到底答不答得上问题"</b>。实测（2026-11-04）：
+         * 语料从 1.4 万字扩到 4.3 万字后，上下文精度从 0.89 掉到 0.75，
+         * 而 docId 命中率仍是 100% —— 说明<b>不是漏了文档，是"字面像"的块挤占了名额</b>。
+         * RRF 区分不了"字面相似"和"真能回答"，cross-encoder 可以。</p>
+         *
+         * <p>★ 它排在用户等待的路径上，所以<b>失败必须降级为 RRF 顺序</b>，
+         * 不能因为重排服务抖动让整轮检索失败（检索是可选能力，对话是主能力）。</p>
+         */
+        private boolean rerankEnabled = true;
+
+        /** 重排模型（百炼 gte-rerank-v2） */
+        private String rerankModel = "gte-rerank-v2";
+
+        /** 重排接口地址（⚠️ 不是 OpenAI 兼容路径，是百炼的原生 rerank API） */
+        private String rerankUrl = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank";
+
+        /** 重排超时（毫秒）：宁可少一层重排，也不让用户多等 */
+        private int rerankTimeoutMs = 2500;
+
+        /**
          * 故障注入：开启后检索**必定失败**（降级路径的验收用）。
          *
          * <p>★★ 为什么一个"故意做坏功能"的开关值得留：<b>降级路径必须被真的跑过一遍，
