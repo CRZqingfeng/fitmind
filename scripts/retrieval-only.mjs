@@ -35,21 +35,25 @@ import fs from 'node:fs';
 const ES = 'http://127.0.0.1:9201/fitmind_knowledge_text_embedding_v4_1024/_search';
 const EMB = 'https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings';
 
+const args = process.argv.slice(2);
+const val = (n) => args.find((a) => a.startsWith(`--${n}=`))?.split('=')[1];
+const numArg = (n, d) => (val(n) ? Number(val(n)) : d);
+
 // —— 与 application.yml 的 fm.ai.rag 保持一致 ——
-const TOP_K = 4;
-const VECTOR_TOPK = 8;
-const KEYWORD_TOPK = 6;
-const THRESHOLD = 0.55;
+// ★ 这几个都能用命令行覆盖，做参数扫描时不必改文件（例：--topk=6 --vec=20）
+const TOP_K = numArg('topk', 4);
+const VECTOR_TOPK = numArg('vec', 20);
+const KEYWORD_TOPK = numArg('kw', 6);
+const THRESHOLD = numArg('threshold', 0.55);
+const CANDIDATE_LIMIT = numArg('fuse', 20);   // = candidate-limit：送进重排的候选条数
 const RRF_K = 60;
 const MAX_PER_DOC = 3;   // 同一篇文档最多占 topK 的几条（与 KnowledgeRetriever 一致）
-const FUSE_LIMIT = Math.max(TOP_K * 2, TOP_K + 2);  // 融合先多留一倍，再挑
-const RERANK_ENABLED = !process.argv.includes('--no-rerank');
+const FUSE_LIMIT = Math.max(CANDIDATE_LIMIT, TOP_K);
+const RERANK_ENABLED = !args.includes('--no-rerank');
 const RERANK_MODEL = 'gte-rerank-v2';
 const RERANK_URL = 'https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank';
 
-const args = process.argv.slice(2);
-const val = (n) => args.find((a) => a.startsWith(`--${n}=`))?.split('=')[1];
-const LIMIT = val('limit') ? Number(val('limit')) : null;
+const LIMIT = numArg('limit', null);
 const VERIFY = args.includes('--verify') || !!val('compare');
 const COMPARE_FILE = val('compare') || '.tmp/ragas/collected.json';
 
@@ -195,20 +199,25 @@ async function rerank(query, docs) {
 }
 
 /**
- * 多样性筛选：同一篇文档最多 MAX_PER_DOC 条。
+ * 多样性筛选：同一篇文档最多 MAX_PER_DOC 条，且同一小节只留一条。
  * 与 KnowledgeRetriever.diversify 逐行对应 —— 这里的逻辑一旦和 Java 不一致，
  * 测出来的就不是线上那条路。
+ * ★ 同节去重实测只回收 9.3% 的名额（27 题 top12），别指望它救精度。
  * ⚠️ 不要加"相邻 chunk 只留一条"：列举型问题（六个错误/三种做法）的答案
- *    本来就铺在连续小节里，相邻去重会把它们砍断，召回会崩。
+ *    本来就铺在连续小节里，相邻去重会把它们砍断（召回 0.62 → 0.14）。
  */
 function diversify(fused, limit) {
   const perDoc = new Map();
+  const seen = new Set();
   const picked = [];
   const overflow = [];
 
   for (const item of fused) {
     const count = perDoc.get(item.doc) || 0;
-    if (count < MAX_PER_DOC) {
+    // 没有 section 时按块唯一（退化成"不去重"），不能退化成"按文档压缩"
+    const key = item.section ? `${item.doc}#${item.section}` : `${item.doc}#chunk:${item.id}`;
+    if (count < MAX_PER_DOC && !seen.has(key)) {
+      seen.add(key);
       picked.push(item);
       perDoc.set(item.doc, count + 1);
       if (picked.length >= limit) return picked;
@@ -228,7 +237,8 @@ async function main() {
   console.log('='.repeat(70));
   console.log(' FitMind 检索回归（只测检索，不调用生成模型）');
   console.log('='.repeat(70));
-  console.log(`  topK=${TOP_K} 阈值=${THRESHOLD} 混合=开  → 每题计算一次 embedding\n`);
+  console.log(`  topK=${TOP_K} 阈值=${THRESHOLD} 向量召回=${VECTOR_TOPK} 候选池=${FUSE_LIMIT} ` +
+              `重排=${RERANK_ENABLED ? '开' : '关'}  → 每题计算一次 embedding\n`);
 
   const items = LIMIT ? EVAL_SET.slice(0, LIMIT) : EVAL_SET;
 
@@ -253,25 +263,42 @@ async function main() {
     const docs = picked.map((d) => d.doc);
     const hit = docs.includes(expect);
     const unique = new Set(docs).size;
-    rows.push({ idx: i + 1, q, expect, goal, docs, hit, vectorHits: v.length, keywordHits: k.length, unique, ms: Date.now() - t });
+    // ★ 候选池命中 = "重排有没有机会看到正确文档"。它为 0 时，
+    //   后面所有环节（重排/配额/topK）都没救 —— 这是 P0 的直接指标。
+    const candHit = reranked.some((d) => d.doc === expect);
+    const sections = new Set(picked.map((d) => `${d.doc}#${d.section || d.id}`)).size;
+    const chars = picked.reduce((s, d) => s + (d.text || '').length, 0);
+    rows.push({
+      idx: i + 1, q, expect, goal, docs, hit, candHit,
+      vectorHits: v.length, keywordHits: k.length,
+      candidate: reranked.length, unique, sections, chars,
+      ms: Date.now() - t,
+    });
 
     console.log(
       `  ${hit ? '✓' : '✗'} #${String(i + 1).padStart(2, '0')} ` +
-      `向量${String(v.length).padStart(2)} 关键词${String(k.length).padStart(2)} → ${unique} 篇  ` +
-      `[${docs.join(',') || '无'}]  ${q.slice(0, 16)}`
+      `向量${String(v.length).padStart(2)} 关键词${String(k.length).padStart(2)} ` +
+      `池${String(reranked.length).padStart(2)} → ${unique}篇/${sections}节/${chars}字  ` +
+      `[${docs.join(',') || '无'}]  ${q.slice(0, 14)}`
     );
   }
 
   const n = rows.length;
   const hitCount = rows.filter((r) => r.hit).length;
+  const candHitCount = rows.filter((r) => r.candHit).length;
   const kwEmpty = rows.filter((r) => r.keywordHits === 0).length;
   const avgUnique = rows.reduce((s, r) => s + r.unique, 0) / n;
+  const avgSections = rows.reduce((s, r) => s + r.sections, 0) / n;
+  const avgChars = rows.reduce((s, r) => s + r.chars, 0) / n;
+  const avgCand = rows.reduce((s, r) => s + r.candidate, 0) / n;
   const sameDoc = rows.filter((r) => r.unique === 1).length;
   const avgMs = rows.reduce((s, r) => s + r.ms, 0) / n;
 
   console.log('\n' + '='.repeat(70));
   console.log(`  检索命中率            ${hitCount}/${n} = ${(hitCount / n * 100).toFixed(1)}%`);
-  console.log(`  平均来源篇数          ${avgUnique.toFixed(1)} 篇（同文档占满 topK：${sameDoc} 题）`);
+  console.log(`  候选池命中率          ${candHitCount}/${n} = ${(candHitCount / n * 100).toFixed(1)}%  （重排看得到正确文档）`);
+  console.log(`  平均候选池条数        ${avgCand.toFixed(1)} 条`);
+  console.log(`  平均来源              ${avgUnique.toFixed(1)} 篇 / ${avgSections.toFixed(1)} 节 / ${avgChars.toFixed(0)} 字（同文档占满：${sameDoc} 题）`);
   console.log(`  关键词路 0 召回       ${kwEmpty}/${n} 题（30% 匹配；改前用 60% 时是 6/27）`);
   console.log(`  平均单题耗时          ${avgMs.toFixed(0)} ms`);
   const embCost = n * 20 * 0.0005 / 1000;
@@ -301,8 +328,12 @@ async function main() {
   }
 
   fs.mkdirSync('.tmp/ragas', { recursive: true });
-  fs.writeFileSync('.tmp/ragas/retrieval-only.json', JSON.stringify(rows, null, 1));
-  console.log('\n  明细已保存：.tmp/ragas/retrieval-only.json');
+  // ★ 文件名带上配置，做参数扫描时不会互相覆盖
+  const tag = val('tag') ||
+    `topk${TOP_K}-vec${VECTOR_TOPK}-fuse${FUSE_LIMIT}${RERANK_ENABLED ? '' : '-norerank'}`;
+  const out = `.tmp/ragas/retrieval-only-${tag}.json`;
+  fs.writeFileSync(out, JSON.stringify(rows, null, 1));
+  console.log(`\n  明细已保存：${out}`);
 }
 
 main().catch((e) => {

@@ -14,8 +14,10 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 知识检索器 —— RAG 的"取"这一半。
@@ -127,10 +129,11 @@ public class KnowledgeRetriever {
                 keywordHits = vectorStore.keywordSearch(question, keywordTopK, filter);
             }
             // 5. RRF 融合
-            // ★ 刻意多留一倍（topK*2）再挑：如果这里就裁到 topK，
-            //   下一步的"每篇文档配额"就没有挑选余地 —— 在 4 条候选里做配额，
-            //   结果往往只是"少给几条"，而不是"把另一篇更该给的换进来"。
-            int fuseLimit = Math.max(topK * 2, topK + 2);
+            // ★★ 融合后<b>不要立刻裁到 topK</b>：重排和配额都需要"挑选余地"。
+            //   原实现是 max(topK*2, topK+2) = 8（topK=4 时），结果把 vector-top-k
+            //   配多大都白搭 —— 排第 11 名的正确小节永远进不了重排。
+            //   现在放开到 candidate-limit（默认 20），让重排决定取舍。
+            int fuseLimit = Math.max(rag.getCandidateLimit(), topK);
             List<Document> fused = hybrid
                     ? ElasticsearchVectorStore.fuseByRrf(List.of(vectorHits, keywordHits), fuseLimit)
                     : vectorHits;
@@ -194,30 +197,37 @@ public class KnowledgeRetriever {
      * 有个硬上限，最坏情况就是"少了两条依据"，而不是"账单翻十倍"。</p>
      */
     /**
-     * 多样性筛选：同一篇文档最多 {@value #MAX_CHUNKS_PER_DOC} 条。
+     * 多样性筛选：同一篇文档最多 {@value #MAX_CHUNKS_PER_DOC} 条，且同一小节只留一条。
      *
      * <p><b>为什么需要它</b>：实测（2026-11-04，语料 4.3 万字 / 155 块）27 题里有 9 题
      * 的四条来源全部来自同一篇文档 —— 等于把同一段话给模型看了三遍，
      * 另外几篇更该给的反而挤不进来。</p>
      *
+     * <p>★★ <b>小节去重（2026-11-04 第二轮新增）</b>：诊断 27 题的 top12 召回，
+     * 同一节被重复召回的比例只有 <b>9.3%</b> —— 所以别指望它能救精度，
+     * 它只是把被重复块白占的名额收回来（免费，为什么不做）。
+     * 用 (docId + section) 做 key 而不是只用 section：
+     * 语料里"参考资料""常见误区"这类小节名在<b>不同文档</b>之间会重名。</p>
+     *
      * <p>★★ <b>踩过的坑（不要重犯）</b>：最初版本还加了"相邻 chunk 只留一条"
      * （理由是 120 字重叠），结果列举型问题召回暴跌 ——
      * "六个错误""三种做法"这类答案本来就铺在连续小节里，相邻去重等于把它们砍断。
-     * <b>120 字重叠占 600 字块的 20%，属于正常上下文衔接，不是冗余。</b>
-     * 真正的冗余由配额拦住就够了，不需要动相邻块。</p>
+     * <b>120 字重叠占 600 字块的 20%，属于正常上下文衔接，不是冗余。</b>（召回 0.62 → 0.14）</p>
      *
-     * <p><b>兜底</b>：若配额导致挑不满，用剩余候选按原顺序补足 ——
+     * <p><b>兜底</b>：若配额/去重导致挑不满，用剩余候选按原顺序补足 ——
      * 宁可多给一条同文档的，也不要少给一条依据（召回比纯度更伤）。</p>
      */
     private List<Document> diversify(List<Document> fused, int limit) {
         Map<String, Integer> perDoc = new HashMap<>();
+        Set<String> seenSections = new HashSet<>();
         List<Document> picked = new ArrayList<>();
         List<Document> overflow = new ArrayList<>();
 
         for (Document doc : fused) {
             String docId = str(doc.getMetadata().get(AigcConstants.META_DOC_ID));
             int count = perDoc.getOrDefault(docId, 0);
-            if (count < MAX_CHUNKS_PER_DOC) {
+            boolean fresh = count < MAX_CHUNKS_PER_DOC && seenSections.add(sectionKey(doc, docId));
+            if (fresh) {
                 picked.add(doc);
                 perDoc.put(docId, count + 1);
                 if (picked.size() >= limit) {
@@ -235,6 +245,18 @@ public class KnowledgeRetriever {
             picked.add(doc);
         }
         return picked;
+    }
+
+    /**
+     * 小节去重用的 key。
+     *
+     * <p>★ 没有 section 元数据时退化成"按块唯一"（用块 id），
+     * 而不是退化成"按文档唯一" —— 后者会把一篇文档的十几块压成一条，
+     * 那是配额逻辑，不是去重逻辑，两个语义不能混。</p>
+     */
+    private String sectionKey(Document doc, String docId) {
+        String section = str(doc.getMetadata().get(AigcConstants.META_SECTION));
+        return section.isBlank() ? docId + "#chunk:" + doc.getId() : docId + "#" + section;
     }
 
     private List<Document> truncate(List<Document> docs, int maxChars) {
