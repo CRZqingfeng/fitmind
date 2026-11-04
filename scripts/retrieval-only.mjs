@@ -47,13 +47,17 @@ const KEYWORD_TOPK = numArg('kw', 6);
 const THRESHOLD = numArg('threshold', 0.55);
 const CANDIDATE_LIMIT = numArg('fuse', 20);   // = candidate-limit：送进重排的候选条数
 const RRF_K = 60;
-const MAX_PER_DOC = 3;   // 同一篇文档最多占 topK 的几条（与 KnowledgeRetriever 一致）
+const MAX_PER_DOC = numArg('max-per-doc', 3);   // 同一篇文档最多占 topK 的几条（与 KnowledgeRetriever 一致）
 const FUSE_LIMIT = Math.max(CANDIDATE_LIMIT, TOP_K);
 const RERANK_ENABLED = !args.includes('--no-rerank');
 const RERANK_MODEL = 'gte-rerank-v2';
 const RERANK_URL = 'https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank';
 
 const LIMIT = numArg('limit', null);
+/** 重排分下限：低于它的候选直接丢掉（模拟"按分裁剪"，先用脚本量效果再改 Java） */
+const MIN_RERANK = numArg('min-rerank', 0);
+/** 把每题注入的上下文正文 + 重排分 dump 出来，供"只评 precision/recall"使用 */
+const DUMP = val('dump');
 const VERIFY = args.includes('--verify') || !!val('compare');
 const COMPARE_FILE = val('compare') || '.tmp/ragas/collected.json';
 
@@ -238,7 +242,8 @@ async function main() {
   console.log(' FitMind 检索回归（只测检索，不调用生成模型）');
   console.log('='.repeat(70));
   console.log(`  topK=${TOP_K} 阈值=${THRESHOLD} 向量召回=${VECTOR_TOPK} 候选池=${FUSE_LIMIT} ` +
-              `重排=${RERANK_ENABLED ? '开' : '关'}  → 每题计算一次 embedding\n`);
+              `重排=${RERANK_ENABLED ? '开' : '关'}${MIN_RERANK > 0 ? ` 重排下限=${MIN_RERANK}` : ''} ` +
+              ` → 每题计算一次 embedding\n`);
 
   const items = LIMIT ? EVAL_SET.slice(0, LIMIT) : EVAL_SET;
 
@@ -258,7 +263,13 @@ async function main() {
     const t = Date.now();
     const [v, k] = await Promise.all([vectorSearch(q, goal), keywordSearch(q, goal)]);
     const fused = rrf([v, k], FUSE_LIMIT);
-    const reranked = await rerank(q, fused);
+    let reranked = await rerank(q, fused);
+    // ★ 重排分下限（默认 0 = 不裁）。全被裁空时保底留第 1 条 ——
+    //   宁可给一条分数低的依据，也不要让这一轮变成"没有资料可用"的拒答。
+    if (MIN_RERANK > 0) {
+      const kept = reranked.filter((d) => (d.rerank ?? 0) >= MIN_RERANK);
+      reranked = kept.length ? kept : reranked.slice(0, 1);
+    }
     const picked = diversify(reranked, TOP_K);
     const docs = picked.map((d) => d.doc);
     const hit = docs.includes(expect);
@@ -273,6 +284,13 @@ async function main() {
       vectorHits: v.length, keywordHits: k.length,
       candidate: reranked.length, unique, sections, chars,
       ms: Date.now() - t,
+      // ★ 只评 precision/recall 时用得上：上下文正文 + 各路分数
+      contexts: picked.map((d) => ({
+        doc: d.doc, section: d.section, text: d.text,
+        rerank: d.rerank ?? null, rrf: d.rrf ?? null, score: d.score ?? null,
+      })),
+      // 重排分的分布，用来看"裁到多少才不至于砍掉好块"
+      rerankTop: reranked.slice(0, Math.min(3, reranked.length)).map((d) => d.rerank ?? null),
     });
 
     console.log(
@@ -334,6 +352,10 @@ async function main() {
   const out = `.tmp/ragas/retrieval-only-${tag}.json`;
   fs.writeFileSync(out, JSON.stringify(rows, null, 1));
   console.log(`\n  明细已保存：${out}`);
+  if (DUMP) {
+    fs.writeFileSync(DUMP, JSON.stringify(rows, null, 1));
+    console.log(`  上下文已 dump（可喂给 eval_context_only.py 只评 precision/recall）：${DUMP}`);
+  }
 }
 
 main().catch((e) => {
