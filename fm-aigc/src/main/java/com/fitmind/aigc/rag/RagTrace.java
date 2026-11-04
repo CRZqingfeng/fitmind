@@ -109,12 +109,21 @@ public class RagTrace {
     public Map<String, Object> toMap() {
         List<Map<String, Object>> list = new ArrayList<>();
         for (Source s : sources) {
-            list.add(Map.of(
-                    "docId", s.docId() == null ? "" : s.docId(),
-                    "title", s.title() == null ? "" : s.title(),
-                    "section", s.section() == null ? "" : s.section(),
-                    "score", s.score() == null ? 0.0 : s.score(),
-                    "preview", s.preview() == null ? "" : s.preview()));
+            // ★ 这里必须用 LinkedHashMap 而不是 Map.of：Map.of 不接受 null，
+            //   而"只被关键词召回的来源没有余弦分"是正常情况。
+            //   ❌ 曾经的写法是 `s.score() == null ? 0.0 : s.score()` —— 于是
+            //      "没有分"被显示成"相似度 0"：一条**真的被用进 prompt 的依据**
+            //      看上去像完全不相关，比不显示更误导。
+            //   现在：有余弦分才输出 score，没有就不输出这个字段（前端显示"—"）。
+            Map<String, Object> item = new java.util.LinkedHashMap<>();
+            item.put("docId", s.docId() == null ? "" : s.docId());
+            item.put("title", s.title() == null ? "" : s.title());
+            item.put("section", s.section() == null ? "" : s.section());
+            if (s.score() != null) {
+                item.put("score", s.score());
+            }
+            item.put("preview", s.preview() == null ? "" : s.preview());
+            list.add(item);
         }
         Map<String, Object> map = new java.util.LinkedHashMap<>();
         map.put("mode", mode);
