@@ -71,6 +71,11 @@ spring:
         group: DEFAULT_GROUP
         namespace: public
     gateway:
+      # ★ 2026-11-05 补：Spring Cloud Gateway 的 response-timeout 默认是 null —— 就是"永不超时"。
+      #   下游卡住时，网关这条连接会一直挂着，这是整条链最外层、也最容易被忘掉的一道超时。
+      httpclient:
+        connect-timeout: 2000     # 毫秒
+        response-timeout: 10s     # 普通接口；SSE 路由单独用 metadata 放开（见 ais）
       # ==================== 路由规则 ====================
       # 约定：请求路径前缀 -> 微服务，配合全局 StripPrefix=1 去掉前缀
       #       例：/us/users/me  ->  fm-user 的 /users/me
@@ -131,6 +136,13 @@ spring:
           uri: lb://fm-aigc
           predicates:
             - Path=/ais/**
+          # ★ 2026-11-05：AI 对话是 SSE 长连接，首 token 可能要等十几秒，
+          #   用全局 10s 会把正常回答切掉。这里单独放到 80s ——
+          #   与 ChatController 的 SseEmitter(chat.timeoutMs + 10s = 70s) 呼应，
+          #   保证"网关 > SSE > 模型 > 路由"由外到内递减。
+          metadata:
+            response-timeout: 80000
+            connect-timeout: 2000
         # M11-2 计划模块：端口 8095，库 fm_plan
         - id: pls
           uri: lb://fm-plan

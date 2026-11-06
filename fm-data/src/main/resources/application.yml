@@ -79,6 +79,14 @@ spring:
     activate:
       on-profile: local
   cloud:
+    openfeign:
+      # 2026-11-05 补：Feign 默认 readTimeout=60s —— 下游一挂，每次调用白占线程 60 秒
+      client:
+        config:
+          default:
+            connect-timeout: 2000
+            read-timeout: 5000
+            logger-level: basic
     nacos:
       server-addr: 127.0.0.1:8848
       username: nacos
@@ -88,7 +96,7 @@ spring:
         namespace: public
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://127.0.0.1:3306/fm_data?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://127.0.0.1:3306/fm_data?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=2000&socketTimeout=10000
     username: root
     password: 1234
 
