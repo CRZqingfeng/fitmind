@@ -53,6 +53,11 @@ spring:
       on-profile: local
   cloud:
     openfeign:
+      # ★ P0-5：没有这一行，fm-api 里的 7 个 fallbackFactory 永远不会被触发
+      #   （OpenFeign 的 fallback 只在 CircuitBreaker 开启时生效）。
+      #   参数见 fm-api 的 FeignCircuitBreakerAutoConfiguration，不在这里重复。
+      circuitbreaker:
+        enabled: true
       # 2026-11-05 补：Feign 默认 readTimeout=60s —— 下游一挂，每次调用白占线程 60 秒
       client:
         config:
@@ -85,4 +90,7 @@ mybatis-plus:
 
 logging:
   level:
-    com.fitmind: debug
+    # ★ P0-8：级别改成可注入 —— 生产用 FM_LOG_LEVEL=info 即可降级，
+    #   不必改 16 份配置再重启。注意 logging.level.* 在 logback 配置之后生效，
+    #   所以改 logback-spring.xml 里的 <logger> 是无效的，改这里才有效。
+    com.fitmind: ${FM_LOG_LEVEL:debug}

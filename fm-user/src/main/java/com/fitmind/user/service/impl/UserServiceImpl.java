@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import com.fitmind.user.enums.UserStatus;
 import com.fitmind.user.mapper.UserMapper;
+import com.fitmind.user.security.LoginAttemptGuard;
 import com.fitmind.user.service.ICodeService;
 import com.fitmind.user.service.IUserDetailService;
 import com.fitmind.user.service.IUserService;
@@ -43,13 +44,17 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     private final PasswordEncoder passwordEncoder;
     private final ICodeService codeService;
     private final IUserDetailService detailService;
+    /** ★ P0-7：登录失败计数（Redis） */
+    private final LoginAttemptGuard loginAttemptGuard;
 
     public UserServiceImpl(PasswordEncoder passwordEncoder,
                            ICodeService codeService,
-                           IUserDetailService detailService) {
+                           IUserDetailService detailService,
+                           LoginAttemptGuard loginAttemptGuard) {
         this.passwordEncoder = passwordEncoder;
         this.codeService = codeService;
         this.detailService = detailService;
+        this.loginAttemptGuard = loginAttemptGuard;
     }
 
     // ==================== 登录校验 ====================
@@ -62,7 +67,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         }
         User user;
         if (LoginFormDTO.LOGIN_TYPE_PASSWORD == type) {
-            user = loginByPassword(loginDTO);
+            user = loginByPasswordGuarded(loginDTO);
         } else if (LoginFormDTO.LOGIN_TYPE_CODE == type) {
             user = loginByVerifyCode(loginDTO.getCellPhone(), loginDTO.getPassword());
         } else {
@@ -79,6 +84,33 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         result.setUserId(user.getId());
         result.setRoleId(roleIdOf(user.getType()));
         return result;
+    }
+
+    /**
+     * 密码登录 + 失败计数（P0-7）。
+     *
+     * <p>★ 为什么在 {@link #loginByPassword} <b>外面</b>包一层，而不是把计数写进它里面：
+     * 那个方法在中途还会抛"账号被冻结""参数缺失"等异常，
+     * 那些<b>不该算作"密码试错"</b>（冻结是既成事实，再试几次也不会变）。
+     * 包一层之后，被统计的只有这个方法的抛出——语义干净。</p>
+     *
+     * <p>★ 锁定期间<b>不校验密码</b>：直接拒绝。否则攻击者仍能从"响应耗时"
+     * （BCrypt 校验约 100ms）侧信道判断密码对不对，计数就白做了。</p>
+     */
+    private User loginByPasswordGuarded(LoginFormDTO loginDTO) {
+        String key = loginAttemptGuard.keyOf(loginDTO.getUsername(), loginDTO.getCellPhone());
+        if (loginAttemptGuard.isBlocked(key)) {
+            throw new BadRequestException(UserErrorInfo.Msg.LOGIN_TOO_MANY_ATTEMPTS);
+        }
+        try {
+            User user = loginByPassword(loginDTO);
+            // 成功即清零：否则"多年累计的几次手滑"会突然把正常用户锁住
+            loginAttemptGuard.onSuccess(key);
+            return user;
+        } catch (BadRequestException e) {
+            loginAttemptGuard.onFailure(key);
+            throw e;
+        }
     }
 
     /** 密码登录 */

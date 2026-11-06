@@ -16,6 +16,26 @@ spring:
     password: ${RABBITMQ_PASSWORD:}
     virtual-host: /
 
+    # ==================== P0-3 生产端确认 ====================
+    # ★ 缺了这两行，RabbitMqHelper 里传的 CorrelationData 只是个随机 id（没人接结果）：
+    #   交换机不存在 / 路由键拼错时，消息被 broker 静默丢弃，业务代码零感知。
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true            # ★ 没有它，上面的 publisher-returns 永远不会触发
+    # ==================== P0-4 消费端重试与死信 ====================
+    listener:
+      simple:
+        # ★ 默认是 true —— 抛异常就立刻重新入队，一条毒消息能把整个队列永久堵死
+        default-requeue-rejected: false
+        prefetch: 20             # 一次只拉 20 条，慢消费者不会把堆吃满
+        retry:
+          enabled: true
+          max-attempts: 3        # 1s / 2s 两轮退避后放弃
+          initial-interval: 1000
+          multiplier: 2
+          max-interval: 10000
+
 fm:
   auth:
     resource:
@@ -55,6 +75,11 @@ spring:
       on-profile: local
   cloud:
     openfeign:
+      # ★ P0-5：没有这一行，fm-api 里的 7 个 fallbackFactory 永远不会被触发
+      #   （OpenFeign 的 fallback 只在 CircuitBreaker 开启时生效）。
+      #   参数见 fm-api 的 FeignCircuitBreakerAutoConfiguration，不在这里重复。
+      circuitbreaker:
+        enabled: true
       # 2026-11-05 补：Feign 默认 readTimeout=60s —— 下游一挂，每次调用白占线程 60 秒
       client:
         config:
@@ -86,4 +111,7 @@ mybatis-plus:
 
 logging:
   level:
-    com.fitmind: debug
+    # ★ P0-8：级别改成可注入 —— 生产用 FM_LOG_LEVEL=info 即可降级，
+    #   不必改 16 份配置再重启。注意 logging.level.* 在 logback 配置之后生效，
+    #   所以改 logback-spring.xml 里的 <logger> 是无效的，改这里才有效。
+    com.fitmind: ${FM_LOG_LEVEL:debug}
