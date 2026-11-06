@@ -62,6 +62,17 @@ spring:
   config:
     activate:
       on-profile: local
+  # ★ P0-6：RequestRateLimiter 的令牌桶存在 Redis 里（多实例共享同一个桶）。
+  #   ⚠️ 代价：这三个限流路由从此依赖 Redis —— Redis 挂掉时登录/注册/发码不可用，
+  #   其余路由不受影响。这是刻意取舍：宁可登录暂时不可用，也不要登录被无限撞库。
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:16379}          # ⚠️ 不是 6379（Windows 保留端口段）
+      password: ${REDIS_PASSWORD:123456}
+      database: 0
+      # ★ 限流是"附加保护"，不能反过来把网关拖死：Redis 卡住时 2 秒即失败
+      timeout: 2s
   cloud:
     nacos:
       server-addr: 127.0.0.1:8848
@@ -71,10 +82,54 @@ spring:
         group: DEFAULT_GROUP
         namespace: public
     gateway:
+      # ★ 2026-11-05 补：Spring Cloud Gateway 的 response-timeout 默认是 null —— 就是"永不超时"。
+      #   下游卡住时，网关这条连接会一直挂着，这是整条链最外层、也最容易被忘掉的一道超时。
+      httpclient:
+        connect-timeout: 2000     # 毫秒
+        response-timeout: 10s     # 普通接口；SSE 路由单独用 metadata 放开（见 ais）
       # ==================== 路由规则 ====================
       # 约定：请求路径前缀 -> 微服务，配合全局 StripPrefix=1 去掉前缀
       #       例：/us/users/me  ->  fm-user 的 /users/me
       routes:
+        # ============ P0-6 限流路由（⚠️ 必须排在 as / us 宽路由之前）============
+        # ★ 路由是"先匹配先返回"：放在宽路由后面就永远匹配不到，
+        #   而症状是"限流配置看起来在，但打多少都不 429"——很难联想。
+        # ★ 只护三个"陌生人可打且代价高"的入口：
+        #     login  —— 可被无限撞库（账号维度在 P0-7，这里补 IP 维度）
+        #     codes  —— 发短信直接花钱，换个号码就能绕开手机号 60s 频控
+        #     register —— 批量注册
+        #   其余路由刻意不限流：参数没有压测依据，乱配只会误伤正常业务。
+        - id: auth-login
+          uri: lb://fm-auth
+          predicates:
+            - Path=/as/accounts/login,/as/accounts/admin/login
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 5     # 每秒补充 5 个令牌
+                redis-rate-limiter.burstCapacity: 10    # 允许 10 个突发
+                key-resolver: "#{@ipKeyResolver}"
+        - id: user-sms-code
+          uri: lb://fm-user
+          predicates:
+            - Path=/us/codes
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 1     # 发短信：每秒 1 条
+                redis-rate-limiter.burstCapacity: 3
+                key-resolver: "#{@ipKeyResolver}"
+        - id: user-register
+          uri: lb://fm-user
+          predicates:
+            - Path=/us/students/register
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 2
+                redis-rate-limiter.burstCapacity: 5
+                key-resolver: "#{@ipKeyResolver}"
+        # ==================== 原有路由 ====================
         - id: us
           uri: lb://fm-user
           predicates:
@@ -131,6 +186,13 @@ spring:
           uri: lb://fm-aigc
           predicates:
             - Path=/ais/**
+          # ★ 2026-11-05：AI 对话是 SSE 长连接，首 token 可能要等十几秒，
+          #   用全局 10s 会把正常回答切掉。这里单独放到 80s ——
+          #   与 ChatController 的 SseEmitter(chat.timeoutMs + 10s = 70s) 呼应，
+          #   保证"网关 > SSE > 模型 > 路由"由外到内递减。
+          metadata:
+            response-timeout: 80000
+            connect-timeout: 2000
         # M11-2 计划模块：端口 8095，库 fm_plan
         - id: pls
           uri: lb://fm-plan
@@ -139,13 +201,19 @@ spring:
       # 全局过滤器：去掉第一层路径前缀
       default-filters:
         - StripPrefix=1
-      # 全局跨域配置，方便前端联调
+      # ==================== 跨域（P0-2）====================
+      # ★ 为什么用 allowedOrigins 而不是 allowedOriginPatterns：
+      #   allowedOrigins 不允许 "*" 与 allowCredentials=true 并存（配错启动即报错），
+      #   等于让框架帮我们挡住"以后有人图省事写回 *"这种回归。
+      #   allowedOriginPatterns 没有这个约束 —— 写 * 照样能跑，
+      #   只在被利用（任意站点带 Cookie 跨域）时才发现。
+      # ★ 默认值只放本地两个开发端口（portal 5173 / admin 5174，均 strictPort）；
+      #   生产用 FM_CORS_ORIGINS 注入真实域名，走同源反代时填那个域名即可。
       globalcors:
         add-to-simple-url-handler-mapping: true
         corsConfigurations:
           '[/**]':
-            allowedOriginPatterns:
-              - "*"
+            allowedOrigins: "${FM_CORS_ORIGINS:http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174}"
             allowedMethods:
               - GET
               - POST
@@ -158,5 +226,8 @@ spring:
 
 logging:
   level:
-    com.fitmind: debug
+    # ★ P0-8：级别改成可注入 —— 生产用 FM_LOG_LEVEL=info 即可降级，
+    #   不必改 16 份配置再重启。注意 logging.level.* 在 logback 配置之后生效，
+    #   所以改 logback-spring.xml 里的 <logger> 是无效的，改这里才有效。
+    com.fitmind: ${FM_LOG_LEVEL:debug}
     org.springframework.cloud.gateway: info

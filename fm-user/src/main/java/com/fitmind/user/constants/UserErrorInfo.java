@@ -25,5 +25,12 @@ public class UserErrorInfo {
         public static final String NON_STUDENT = "该账号不是学员账号";
         public static final String NON_STAFF = "该账号不是管理端账号";
         public static final String PROFILE_NOT_EXISTS = "尚未填写身体档案";
+        /**
+         * ★ P0-7：连续失败达到上限后的提示。
+         *
+         * <p>刻意<b>不</b>回显"还剩几次"——那等于告诉撞库的人"再试 2 次就成"。
+         * 也不说"账号已锁定"（会泄露账号是否存在），只说"登录失败次数过多"。</p>
+         */
+        public static final String LOGIN_TOO_MANY_ATTEMPTS = "登录失败次数过多，请 15 分钟后再试";
     }
 }

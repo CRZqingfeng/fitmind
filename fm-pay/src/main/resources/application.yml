@@ -16,6 +16,26 @@ spring:
     password: ${RABBITMQ_PASSWORD:}
     virtual-host: /
 
+    # ==================== P0-3 生产端确认 ====================
+    # ★ 缺了这两行，RabbitMqHelper 里传的 CorrelationData 只是个随机 id（没人接结果）：
+    #   交换机不存在 / 路由键拼错时，消息被 broker 静默丢弃，业务代码零感知。
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true            # ★ 没有它，上面的 publisher-returns 永远不会触发
+    # ==================== P0-4 消费端重试与死信 ====================
+    listener:
+      simple:
+        # ★ 默认是 true —— 抛异常就立刻重新入队，一条毒消息能把整个队列永久堵死
+        default-requeue-rejected: false
+        prefetch: 20             # 一次只拉 20 条，慢消费者不会把堆吃满
+        retry:
+          enabled: true
+          max-attempts: 3        # 1s / 2s 两轮退避后放弃
+          initial-interval: 1000
+          multiplier: 2
+          max-interval: 10000
+
 fm:
   auth:
     resource:
@@ -37,6 +57,12 @@ pay:
   # 回调验签用的密钥（Mock 渠道也走同一套验签流程）
   sign-key: fitmind-pay-sign-key
   mock:
+    # ★ P0-1：Mock 控制器的总开关。**缺省不写 = 关闭**（@ConditionalOnProperty 默认 false），
+    #   关闭时 /mock/** 直接不存在（404），而不是"存在但没鉴权"。
+    #   下面 local profile 里显式打开；生产 profile 不写即为关闭 —— 这是刻意的安全默认值。
+    #   为什么必须这样：这个控制器能让任意订单变"已支付"，/sign 还能签发合法签名，
+    #   暴露在任何有公网入口的环境上就是零元购。
+    enabled: false
     # Mock 渠道"支付成功"后是否自动回调（false 时需手动调 /ps/mock/pay/{no}）
     auto-notify: false
 
@@ -58,6 +84,19 @@ spring:
     activate:
       on-profile: local
   cloud:
+    openfeign:
+      # ★ P0-5：没有这一行，fm-api 里的 7 个 fallbackFactory 永远不会被触发
+      #   （OpenFeign 的 fallback 只在 CircuitBreaker 开启时生效）。
+      #   参数见 fm-api 的 FeignCircuitBreakerAutoConfiguration，不在这里重复。
+      circuitbreaker:
+        enabled: true
+      # 2026-11-05 补：Feign 默认 readTimeout=60s —— 下游一挂，每次调用白占线程 60 秒
+      client:
+        config:
+          default:
+            connect-timeout: 2000
+            read-timeout: 5000
+            logger-level: basic
     nacos:
       server-addr: 127.0.0.1:8848
       username: nacos
@@ -67,7 +106,7 @@ spring:
         namespace: public
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://127.0.0.1:3306/fm_pay?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://127.0.0.1:3306/fm_pay?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=2000&socketTimeout=10000
     username: root
     password: 1234
   data:
@@ -88,4 +127,14 @@ mybatis-plus:
 
 logging:
   level:
-    com.fitmind: debug
+    # ★ P0-8：级别改成可注入 —— 生产用 FM_LOG_LEVEL=info 即可降级，
+    #   不必改 16 份配置再重启。注意 logging.level.* 在 logback 配置之后生效，
+    #   所以改 logback-spring.xml 里的 <logger> 是无效的，改这里才有效。
+    com.fitmind: ${FM_LOG_LEVEL:debug}
+
+# ==================== local profile 覆盖（P0-1）====================
+# ★ 本地闭环演示与 e2e 脚本（accept-m4-*.mjs）依赖 Mock 支付/退款接口，
+#   所以 local 显式打开；其它 profile 不写即为关闭。
+pay:
+  mock:
+    enabled: true

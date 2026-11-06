@@ -10,6 +10,7 @@ import io.swagger.v3.oas.annotations.Parameters;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
@@ -29,11 +30,16 @@ import java.util.Map;
  * <p>⚠️ 与支付侧对齐的一点：<b>签名参数必须与 {@code /notify/refund} 侧严格一致</b>
  * （这里是 {@code refundOrderNo} + {@code result}）。M4-2 在支付回调上踩过一次
  * "两边字段不一致导致永远验不过"的坑，所以两侧都写了这句注释互相提醒。</p>
+ *
+ * <p>★★ <b>只在 {@code pay.mock.enabled=true} 时注册</b>（缺省即关闭，P0-1）：
+ * 与 {@code MockPayController} 同理 —— 它能把任意退款申请"变成已到账"，
+ * 还能签发合法签名。生产环境必须不存在。</p>
  */
 @Slf4j
 @RestController
 @RequestMapping("/mock/refund")
 @RequiredArgsConstructor
+@ConditionalOnProperty(prefix = "pay.mock", name = "enabled", havingValue = "true")
 @Tag(name = "模拟退款（本地闭环用）")
 public class MockRefundController {
 

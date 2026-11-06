@@ -42,6 +42,16 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+
+        <!--
+          ★ P0-6 限流：RequestRateLimiter 需要「响应式」Redis 客户端。
+          必须是 -reactive 而不是普通的 data-redis —— 网关是 WebFlux 技术栈，
+          阻塞式驱动会占住事件循环线程，等于把网关自己拖死。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

@@ -11,6 +11,7 @@ import io.swagger.v3.oas.annotations.Parameters;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -32,11 +33,22 @@ import java.util.Map;
  * <p>为什么不让 {@code /mock/pay} 直接改数据库：
  * 那样"支付成功"就绕过了回调链路，真正容易出错的那段（验签、幂等、发消息）
  * 反而<b>测不到</b>。常见实现的 7 个坑里有 3 个恰好就在那段上。</p>
+ *
+ * <p>★★ <b>只在 {@code pay.mock.enabled=true} 时注册</b>（缺省即关闭，P0-1）：</p>
+ * <ul>
+ *   <li>这个控制器能让任意订单"变成已支付"，{@code /sign/{no}} 还能签发<b>合法签名</b>
+ *       —— 暴露在任何有公网入口的环境上就是零元购；</li>
+ *   <li>所以按"<b>忘配 = 不存在</b>"设计，而不是"忘配 = 裸奔"。
+ *       新增环境忘了抄配置时，结果是 404，而不是漏洞；</li>
+ *   <li>本地闭环演示：在 local profile 的 application.yml 里显式写
+ *       {@code pay.mock.enabled: true}。</li>
+ * </ul>
  */
 @Slf4j
 @RestController
 @RequestMapping("/mock")
 @RequiredArgsConstructor
+@ConditionalOnProperty(prefix = "pay.mock", name = "enabled", havingValue = "true")
 @Tag(name = "模拟支付（本地闭环用）")
 public class MockPayController {
 

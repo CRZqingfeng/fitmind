@@ -32,6 +32,18 @@ spring:
     activate:
       on-profile: local
   cloud:
+    # ★ P0-5：本服务一直在用 Feign（AccountServiceImpl → UserClient），
+    #   但此前<b>没有任何 openfeign 配置</b> —— 意味着吃的是默认 readTimeout=60s：
+    #   用户服务一挂，每次登录都会白占线程 60 秒。这里补上与其它服务一致的配置。
+    openfeign:
+      circuitbreaker:
+        enabled: true        # 没有这一行，fm-api 的 UserClientFallback 永远不会被触发
+      client:
+        config:
+          default:
+            connect-timeout: 2000
+            read-timeout: 5000
+            logger-level: basic
     nacos:
       server-addr: 127.0.0.1:8848
       username: nacos
@@ -63,5 +75,7 @@ mybatis-plus:
 
 logging:
   level:
-    com.fitmind: debug
+    # ★ P0-8：级别改成可注入 —— 生产用 FM_LOG_LEVEL=info 即可降级，不必改 16 个文件再重启。
+    #   注意 logging.level.* 在 logback 配置之后生效，所以改 logback-spring.xml 的 <logger> 无效，改这里才有效。
+    com.fitmind: ${FM_LOG_LEVEL:debug}
     com.fitmind.auth.mapper: debug
