@@ -30,17 +30,15 @@ spring:
     # ==================== P0-4 消费端重试与死信 ====================
     listener:
       simple:
-        # ★ 默认是 true —— 抛异常就立刻重新入队，一条毒消息能把整个队列永久堵死
+        # ★ P0-4：抛异常不要无限重投（默认 true = 立刻重新入队 → 死循环，
+        #   一条毒消息会把后面所有正常消息都堵住）
         default-requeue-rejected: false
-        prefetch: 20             # 一次只拉 20 条，慢消费者不会把堆吃满
         retry:
           enabled: true
-          max-attempts: 3        # 1s / 2s 两轮退避后放弃
+          max-attempts: 3        # 1s / 2s 两轮退避后放弃，之后进死信队列
           initial-interval: 1000
           multiplier: 2
           max-interval: 10000
-    listener:
-      simple:
         # 逐条处理：索引同步涉及跨服务调用（Feign 拉课程数据），并发高了容易压垮 fm-course；
         # 而且同一课程重复消费要能被幂等吸收，串行更简单可靠。
         concurrency: 1
