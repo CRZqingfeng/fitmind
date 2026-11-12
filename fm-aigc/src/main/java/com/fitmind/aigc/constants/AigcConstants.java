@@ -167,6 +167,17 @@ public final class AigcConstants {
     /** 元数据过滤字段：知识分类（training / nutrition / recovery / injury） */
     public static final String META_CATEGORY = "category";
 
+    /**
+     * 关键词召回（BM25）的原始分，只存在元数据里，<b>不写进 Document.score</b>。
+     *
+     * <p>★★ 为什么要分开（#A33）：BM25 无上界、随语料长度变化，和余弦相似度
+     * 不是一个量纲。曾经把它直接塞进 {@code score}，前端把它当"相似度"显示成
+     * <b>10.09</b>（余弦上限是 1）—— 而且它还会让"阈值 0.55"对关键词路形同失效。
+     * 现在的约定：<b>{@code score} 要么是真实余弦，要么是 null</b>；
+     * BM25 原值放这里供排查，永远不参与任何比较。</p>
+     */
+    public static final String META_KEYWORD_SCORE = "keyword_score";
+
     // ==================== RAG 提示词片段 ====================
 
     /**

@@ -2,6 +2,7 @@ package com.fitmind.aigc.rag;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fitmind.aigc.config.AigcProperties;
+import com.fitmind.aigc.constants.AigcConstants;
 import lombok.extern.slf4j.Slf4j;
 import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest;
 import org.elasticsearch.action.bulk.BulkRequest;
@@ -345,7 +346,7 @@ public class ElasticsearchVectorStore implements VectorStore {
                     //   会返回 1 条，而不是"取回 4 条再丢掉 3 条"——
                     //   后者的行为是"明明库里有更相关的第 5 条，却因为前 4 条被丢掉而漏掉了"
                     .minScore((float) (request.getSimilarityThreshold() + 1.0)));
-            return hitToDocuments(client.search(esReq, RequestOptions.DEFAULT));
+            return hitToDocuments(client.search(esReq, RequestOptions.DEFAULT), ScoreKind.COSINE);
         } catch (Exception e) {
             throw new IllegalStateException("向量检索失败：" + e.getMessage(), e);
         }
@@ -363,9 +364,12 @@ public class ElasticsearchVectorStore implements VectorStore {
         try {
             BoolQueryBuilder bool = QueryBuilders.boolQuery();
             MatchQueryBuilder match = QueryBuilders.matchQuery(FIELD_CONTENT, query)
-                    // 整句提问按 AND 匹配几乎必然为空（口语化问题里总有不在语料里的词），
-                    // 60% 是"召回有保障 + 不至于全是不相关项"之间的折中
-                    .minimumShouldMatch("60%");
+                    // ★ 2026-11-04 由 60% 降到 30%：语料从 1.4 万字扩到 4.3 万字后，
+                    //   "整句 60% 的词都能匹配上"变得几乎不可能 —— 实测 27 题里有 6 题
+                    //   关键词路直接 0 召回，混合检索退化成纯向量。
+                    //   30% 是"至少命中几个实词"的量级：既保留精确术语（臀桥/RPE 8）的召回价值，
+                    //   又不至于让长句提问颗粒无收。
+                    .minimumShouldMatch("30%");
             bool.must(match);
             if (filter != null) {
                 bool.filter(toEsQuery(filter));
@@ -373,7 +377,7 @@ public class ElasticsearchVectorStore implements VectorStore {
             org.elasticsearch.action.search.SearchRequest esReq =
                     new org.elasticsearch.action.search.SearchRequest(indexName());
             esReq.source(new SearchSourceBuilder().query(bool).size(Math.max(1, topK)));
-            return hitToDocuments(client.search(esReq, RequestOptions.DEFAULT));
+            return hitToDocuments(client.search(esReq, RequestOptions.DEFAULT), ScoreKind.BM25);
         } catch (Exception e) {
             throw new IllegalStateException("关键词检索失败：" + e.getMessage(), e);
         }
@@ -410,8 +414,9 @@ public class ElasticsearchVectorStore implements VectorStore {
                     Document origin = docs.get(e.getKey());
                     Map<String, Object> meta = new HashMap<>(origin.getMetadata());
                     meta.put("rrf", Math.round(e.getValue() * 10000) / 10000.0);
-                    // 保留原文档的向量相似度分数（关键词一路带回来的分是 BM25，不可比，
-                    // 所以只把 RRF 融合分单独放 meta，不加权进 score）
+                    // 分数沿用"先到先得"的那一路（向量在前，所以两路都有的文档
+                    // 拿到的是真实余弦）；只被关键词召回过的文档 score 为 null ——
+                    // 宁可不显示，也不把 BM25 当成相似度（#A33）
                     return Document.builder()
                             .id(origin.getId())
                             .text(origin.getText())
@@ -424,7 +429,25 @@ public class ElasticsearchVectorStore implements VectorStore {
 
     // ==================== 内部 ====================
 
-    private List<Document> hitToDocuments(SearchResponse resp) {
+    /**
+     * 两路的分数口径 —— <b>这是 #A33 的修复点</b>。
+     *
+     * <p>★★ 修之前的写法是无条件 {@code score = hit.getScore() - 1.0}，
+     * 那个 −1.0 只在<b>向量路</b>成立（ES 侧为了绕开"script_score 不许负分"做了 +1.0）。
+     * 关键词路复用同一个映射方法，于是 BM25 也被减了 1：实测出现过
+     * 「相似度 10.09 / 9.65 / 7.38」—— 余弦上限是 1，这种数字只能说明量纲混了。</p>
+     *
+     * <p>后果不止是显示难看：<b>阈值 0.55 对关键词路形同失效</b>（BM25−1 几乎恒大于 0.55），
+     * 所以"宁可拒答也不要误导"这个设计在混合路径上有一半是空的。</p>
+     */
+    private enum ScoreKind {
+        /** 向量路：ES 分已 +1.0，这里还原成真实余弦相似度 */
+        COSINE,
+        /** 关键词路：BM25 无上界、与余弦不可比，<b>不写进 score</b>，原值进元数据 */
+        BM25
+    }
+
+    private List<Document> hitToDocuments(SearchResponse resp, ScoreKind kind) {
         List<Document> result = new ArrayList<>();
         for (SearchHit hit : resp.getHits().getHits()) {
             Map<String, Object> source = hit.getSourceAsMap();
@@ -434,13 +457,21 @@ public class ElasticsearchVectorStore implements VectorStore {
             Map<String, Object> metadata = new HashMap<>(source);
             Object content = metadata.remove(FIELD_CONTENT);
             metadata.remove(FIELD_EMBEDDING);
-            result.add(Document.builder()
+
+            Document.Builder builder = Document.builder()
                     .id(hit.getId())
                     .text(content == null ? "" : String.valueOf(content))
-                    .metadata(metadata)
-                    // 还原真实余弦相似度（ES 那边 +1.0 了）
-                    .score((double) hit.getScore() - 1.0)
-                    .build());
+                    .metadata(metadata);
+            if (kind == ScoreKind.COSINE) {
+                // 还原真实余弦相似度（ES 那边 +1.0 了）
+                builder.score((double) hit.getScore() - 1.0);
+            } else {
+                // ★ 不设 score（保持 null）：BM25 伪装成"相似度"是 #A33 的根源。
+                //   原值放元数据，排查时能看到真实 BM25，但它不参与任何比较/阈值。
+                metadata.put(AigcConstants.META_KEYWORD_SCORE,
+                        Math.round(hit.getScore() * 10000) / 10000.0);
+            }
+            result.add(builder.build());
         }
         return result;
     }

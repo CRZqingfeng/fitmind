@@ -15,7 +15,8 @@
 --   动作：Sanotsu/free-fitness 中文版 assets/datasets/free-exercise-db-zh.json（873 条）
 --         取的 20 条 id 均实测存在；name / instructions / images / level 原样入库。
 --         数据集**没有** heat、lumbar_pressure、gif_url、中文器械名 → 这些列留 NULL，
---         不猜、不估、不翻译。图片存完整 URL（ghfast 前缀，直连 raw 本机超时）。
+--         不猜、不估、不翻译。图片存**对象 key**（`action-cover/exercise/{数据集id}/1.jpg`），
+--         由 `fm.asset.base-url` 拼成可访问地址（M11-5 P3 起；此前是 ghfast 外链，本机被墙）。
 --   计划：3 个官方示例，只引用上面 20 个动作，组数次数由本文件生成时算好。
 --
 -- 执行：mysql -h127.0.0.1 -P3306 -uroot -p1234 < sql/fm_plan.sql

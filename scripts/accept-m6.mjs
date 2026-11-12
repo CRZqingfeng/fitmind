@@ -822,10 +822,17 @@ async function main() {
   const rag = ragAns?.rag || {};
   check('★ 知识问答触发了检索（ragMode=rag）', ragAns?.ragMode === 'rag', `ragMode=${ragAns?.ragMode}`);
   check('★ 检索命中并注入 prompt', Number(ragAns?.ragHits) > 0, `hits=${ragAns?.ragHits}`);
-  check('引用来源结构化返回（title / section / docId / score 齐全）',
+  check('引用来源结构化返回（title / section / docId 齐全，score 可选）',
     Array.isArray(rag.sources) && rag.sources.length > 0
-      && rag.sources.every((s) => s.title && s.docId && s.score !== undefined),
+      && rag.sources.every((s) => s.title && s.docId && (s.score == null || typeof s.score === 'number')),
     JSON.stringify(rag.sources?.[0] || {}).slice(0, 140));
+  // ★★ #A33 回归断言：修复前关键词路把 BM25（无上界）减 1 后当余弦返回，实测出现过 10.09。
+  //    余弦上限是 1 —— 只要出现 >1，就说明两路量纲又混了。
+  //    ⚠️ 旧断言写的是 `score !== undefined`，null / 缺字段都能通过，抓不住这个 bug。
+  //    ⚠️ 也不能要求"每条都有 score"：只被关键词召回的来源本来就没有余弦分。
+  check('★★ 分数口径正确（余弦 ∈[0,1]；仅关键词命中的不带 score；不得出现 BM25 的 >1）',
+    (rag.sources || []).every((s) => s.score == null || (typeof s.score === 'number' && s.score >= 0 && s.score <= 1)),
+    `分数=${(rag.sources || []).map((s) => s.score ?? '—').join(',')}`);
   check('★★ 溯源指向正确的语料（问蛋白质 → 命中 protein-intake）',
     (rag.sources || []).some((s) => s.docId === '05-protein-intake'),
     `来源=${(rag.sources || []).map((s) => s.docId).join(',')}`);
