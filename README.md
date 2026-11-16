@@ -261,3 +261,9 @@ fitmind/
 个人全栈项目，用于学习微服务架构与 LLM 应用工程化。代码按模块渐进式搭建，每个模块走完「方案 → 编码 → 端到端验收 → 文档回填」的流程。
 
 AI 相关能力依赖外部模型服务，需自备 DeepSeek 与阿里百炼的 API Key（见 `docker/.env.example`）。
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 CRZ
