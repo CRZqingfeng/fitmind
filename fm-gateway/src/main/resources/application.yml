@@ -77,7 +77,7 @@ spring:
     nacos:
       server-addr: 127.0.0.1:8848
       username: nacos
-      password: nacos
+      password: ${NACOS_PASSWORD:nacos}
       discovery:
         group: DEFAULT_GROUP
         namespace: public

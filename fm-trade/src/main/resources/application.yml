@@ -107,7 +107,7 @@ spring:
     nacos:
       server-addr: 127.0.0.1:8848
       username: nacos
-      password: nacos
+      password: ${NACOS_PASSWORD:nacos}
       discovery:
         group: DEFAULT_GROUP
         namespace: public
@@ -115,7 +115,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://127.0.0.1:3306/fm_trade?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=2000&socketTimeout=10000
     username: root
-    password: 1234
+    password: ${DB_PASSWORD:1234}
     hikari:
       # ★ 2026-11-05 补：Hikari 的 connectionTimeout 只管"从池里拿连接的等待"。
       #   ⚠️ socketTimeout 不是 HikariConfig 的属性（javap 核实 setter 清单里没有 setSocketTimeout），
@@ -126,7 +126,7 @@ spring:
     redis:
       host: 127.0.0.1
       port: ${REDIS_PORT:16379}
-      password: 123456
+      password: ${REDIS_PASSWORD:123456}
       database: 0
 
 # ==================== MyBatis-Plus ====================

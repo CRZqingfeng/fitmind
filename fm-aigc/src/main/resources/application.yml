@@ -100,7 +100,7 @@ fm:
         enabled: ${AIGC_PROMPT_NACOS_ENABLED:true}
         server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
         username: nacos
-        password: nacos
+        password: ${NACOS_PASSWORD:nacos}
         group: DEFAULT_GROUP
         # ⚠️ 必须与"发布配置时选的命名空间"一致，否则静默读不到（发布返回 true、列表也看得到，
         #    但客户端 getConfig 返回 null，且不报错）。Nacos 3.x 里 public 的 ID 是 public
@@ -232,7 +232,7 @@ spring:
     nacos:
       server-addr: 127.0.0.1:8848
       username: nacos
-      password: nacos
+      password: ${NACOS_PASSWORD:nacos}
       discovery:
         group: DEFAULT_GROUP
         namespace: public
@@ -240,7 +240,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://127.0.0.1:3306/fm_aigc?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=2000&socketTimeout=10000
     username: root
-    password: 1234
+    password: ${DB_PASSWORD:1234}
   data:
     redis:
       host: ${REDIS_HOST:127.0.0.1}
